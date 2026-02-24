@@ -1,0 +1,7 @@
+{
+  "name": "Mia Sticker 12.02.69",
+  "description": "Create professional-grade sticker sheets (16 poses)",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

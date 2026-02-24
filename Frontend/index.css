@@ -1,0 +1,246 @@
+:root {
+  color-scheme: light;
+  --app-bg: #f8fafc;
+  --app-text: #0f172a;
+  --focus-color: #4f46e5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.min-h-dvh {
+  min-height: 100dvh;
+}
+
+.focus-ring:focus {
+  outline: none;
+}
+
+.focus-ring:focus-visible {
+  outline: 3px solid var(--focus-color);
+  outline-offset: 2px;
+}
+
+@keyframes runner-track-shift {
+  from {
+    background-position-x: 0;
+  }
+  to {
+    background-position-x: -52px;
+  }
+}
+
+@keyframes runner-avatar-move {
+  from {
+    left: -3.7rem;
+  }
+  to {
+    left: calc(100% + 0.5rem);
+  }
+}
+
+@keyframes runner-avatar-bounce {
+  0%,
+  100% {
+    margin-top: 0;
+  }
+  50% {
+    margin-top: -7px;
+  }
+}
+
+@keyframes runner-sticker-tilt {
+  0% {
+    transform: rotate(-12deg) translateY(0);
+  }
+  100% {
+    transform: rotate(-5deg) translateY(-1px);
+  }
+}
+
+@keyframes runner-wheel-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes runner-speed-fade {
+  0%,
+  100% {
+    opacity: 0.15;
+    transform: translateX(0);
+  }
+  50% {
+    opacity: 0.5;
+    transform: translateX(-8px);
+  }
+}
+
+.loading-runner-track {
+  position: relative;
+  height: 88px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid #c7d2fe;
+  background:
+    linear-gradient(180deg, #eef2ff 0%, #dbeafe 100%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.35) 0 26px, rgba(99, 102, 241, 0.06) 26px 52px);
+  animation: runner-track-shift 0.9s linear infinite;
+}
+
+.loading-runner-lane {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  height: 2px;
+  width: calc(100% - 1.5rem);
+  background: linear-gradient(90deg, rgba(79, 70, 229, 0.05), rgba(79, 70, 229, 0.35), rgba(79, 70, 229, 0.05));
+}
+
+.loading-runner-avatar {
+  position: absolute;
+  left: -3.7rem;
+  top: calc(50% - 2rem);
+  width: 4rem;
+  height: 4.6rem;
+  overflow: visible;
+  animation:
+    runner-avatar-move 4.2s linear infinite,
+    runner-avatar-bounce 0.45s ease-in-out infinite;
+}
+
+.loading-runner-sticker-shell {
+  position: relative;
+  z-index: 2;
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 1.05rem;
+  border: 3px solid #ffffff;
+  overflow: hidden;
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.2);
+  animation: runner-sticker-tilt 0.33s ease-in-out infinite alternate;
+}
+
+.loading-runner-sticker-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.15), transparent 45%);
+  pointer-events: none;
+}
+
+.loading-runner-sticker-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: saturate(1.08) contrast(1.04);
+}
+
+.loading-runner-wheel {
+  position: absolute;
+  bottom: 0.02rem;
+  width: 1.02rem;
+  height: 1.02rem;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  background:
+    radial-gradient(circle at 28% 24%, rgba(255, 255, 255, 0.92) 0 16%, rgba(255, 255, 255, 0) 35%),
+    conic-gradient(
+      from 0deg,
+      #93c5fd 0deg 54deg,
+      #f9a8d4 54deg 122deg,
+      #c4b5fd 122deg 192deg,
+      #67e8f9 192deg 262deg,
+      #86efac 262deg 314deg,
+      #fde68a 314deg 360deg
+    );
+  box-shadow:
+    0 3px 8px rgba(96, 165, 250, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -2px 3px rgba(99, 102, 241, 0.16);
+  animation: runner-wheel-spin 0.28s linear infinite;
+}
+
+.loading-runner-wheel::before {
+  content: "";
+  position: absolute;
+  inset: 0.17rem;
+  border-radius: 999px;
+  border: 1.5px solid rgba(255, 255, 255, 0.95);
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.95) 0 26%, rgba(255, 255, 255, 0) 40%),
+    radial-gradient(circle at center, #fef9ff 0 40%, #ddd6fe 41% 62%, transparent 63% 100%);
+  box-shadow: inset 0 -1px 2px rgba(129, 140, 248, 0.24);
+}
+
+.loading-runner-wheel::after {
+  content: "";
+  position: absolute;
+  top: 0.1rem;
+  left: 0.18rem;
+  width: 0.42rem;
+  height: 0.24rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(255, 255, 255, 0.45) 100%);
+  transform: rotate(-25deg);
+}
+
+.loading-runner-wheel-left {
+  left: 1.02rem;
+}
+
+.loading-runner-wheel-right {
+  left: 2.06rem;
+}
+
+.loading-runner-speed {
+  position: absolute;
+  right: 1.25rem;
+  width: 1rem;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.2) 0%, rgba(244, 114, 182, 0.55) 48%, rgba(129, 140, 248, 0.35) 100%);
+  animation: runner-speed-fade 0.55s ease-in-out infinite;
+}
+
+.loading-runner-speed-a {
+  top: 33px;
+}
+
+.loading-runner-speed-b {
+  top: 44px;
+  animation-delay: 0.1s;
+}
+
+.loading-runner-speed-c {
+  top: 55px;
+  animation-delay: 0.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
