@@ -44,9 +44,9 @@ async def generate_stickers(
     try:
         # 2. Vertex AI Generation
         grid_bytes = await ai_service.generate_sticker_grid(
-            prompt=request.prompt,
             image_uri=request.image_uri,
-            style=request.style
+            style_id=request.style,
+            extra_prompt=request.prompt,
         )
         
         # 3. Image Processing (Slice, Remove BG, White Stroke)
