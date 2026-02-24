@@ -114,3 +114,58 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to refund coin for {user_id}: {e}")
             raise
+
+    async def top_up_coin(self, user_id: str, coins: int, thb_amount: float, reference_id: str) -> dict:
+        """
+        Top up coins and total spent THB using an atomic transaction.
+        Also logs the transaction in the 'transactions' collection.
+        """
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+        
+        # Auto-generate a transaction ID
+        txn_ref = self.db.collection('transactions').document()
+
+        @firestore.async_transactional
+        async def atomic_top_up(transaction, user_ref, txn_ref, coins, thb_amount, reference_id):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+            
+            # Update user balances
+            current_coins = snapshot.get("coin_balance")
+            current_spent = snapshot.get("total_spent_thb", 0.0)
+            
+            new_coins = current_coins + coins
+            new_spent = current_spent + thb_amount
+            
+            now_utc = datetime.now(timezone.utc)
+            
+            transaction.update(user_ref, {
+                "coin_balance": new_coins,
+                "total_spent_thb": new_spent,
+                "updated_at": now_utc
+            })
+            
+            # Log the transaction
+            transaction.set(txn_ref, {
+                "txn_id": txn_ref.id,
+                "user_id": user_id,
+                "type": "topup",
+                "amount": coins,
+                "reference_id": reference_id,
+                "timestamp": now_utc
+            })
+            
+            return {
+                "coin_balance": new_coins,
+                "total_spent_thb": new_spent
+            }
+
+        try:
+            result = await atomic_top_up(transaction, user_ref, txn_ref, coins, thb_amount, reference_id)
+            logger.info(f"Top-up successful for {user_id}. Added {coins} coins for {thb_amount} THB.")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to top up coin for {user_id}: {e}")
+            raise
