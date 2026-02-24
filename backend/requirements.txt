@@ -1,0 +1,11 @@
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic-settings>=2.0.0
+google-cloud-firestore>=2.11.1
+google-cloud-storage>=2.10.0
+google-cloud-aiplatform>=1.30.0
+rembg>=2.0.50
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+python-multipart>=0.0.6

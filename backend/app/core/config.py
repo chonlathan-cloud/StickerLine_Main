@@ -1,0 +1,19 @@
+import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    PROJECT_ID: str
+    GCS_BUCKET_NAME: str
+    LIFF_CHANNEL_ID: str
+    LINE_CHANNEL_SECRET: str
+    OMISE_SECRET_KEY: str
+    OMISE_PUBLIC_KEY: str
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        # Ignore extra environment variables that aren't defined here
+        extra="ignore"
+    )
+
+settings = Settings()

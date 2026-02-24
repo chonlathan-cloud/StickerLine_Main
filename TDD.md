@@ -217,3 +217,12 @@ async def generate_sticker_workflow(user_id, input_uri, style, prompt):
 2. **CORS Policy:** ที่ Backend ต้องตั้งค่า CORS ให้รับ Request จาก Domain ของ Frontend (Firebase Hosting) เท่านั้น.
 3. **Rate Limiting:** (Optional ใน Phase 1) ใช้ Cloud Armor กันการยิง API รัวๆ.
 4. **Omise Webhook:** ต้องตรวจสอบ Signature verification เพื่อป้องกันคนปลอม Webhook มาเติมเงินเอง.
+
+6. Implementation Steps (Action Plan)
+เพื่อให้งานเดินหน้าอย่างมีระบบ ผมแนะนำลำดับการเขียน Code ดังนี้ครับ:
+
+Step 1: Boilerplate: สร้างโครงสร้างโฟลเดอร์ FastAPI + Dockerfile.
+Step 2: Firestore: เขียน services/user_service.py ให้เชื่อมต่อ DB และทำ Atomic Deduction ให้ผ่านก่อน.
+Step 3: Vertex AI: เขียน services/ai_service.py ให้รับ Input URI และเรียก Gemini ได้จริง.
+Step 4: Image Processor: เขียน services/image_service.py โดยเริ่มจากแค่ Slice รูปก่อน (ยังไม่ต้องทำ Stroke) เพื่อ test flow.
+Step 5: Frontend Integration: แก้ Frontend ให้ยิง API แทนการทำเอง.
