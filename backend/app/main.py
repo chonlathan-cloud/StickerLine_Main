@@ -25,10 +25,10 @@ async def root():
     """Health check endpoint for Cloud Run."""
     return {"status": "ok", "service": "stickerline-api"}
 
-from app.api.v1 import auth, stickers
+from app.api.v1 import auth, stickers, webhooks, users, upload
 
-# TODO: Include proper routers when they are created
-# from app.api.v1 import payment
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 app.include_router(stickers.router, prefix="/api/v1/jobs", tags=["jobs"])
-# app.include_router(payment.router, prefix="/webhooks", tags=["payment"])
+app.include_router(upload.router, prefix="/api/v1", tags=["upload"])
+app.include_router(webhooks.router, prefix="/webhooks", tags=["payment"])
