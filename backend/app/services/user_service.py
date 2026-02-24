@@ -84,3 +84,33 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to deduct coin for {user_id}: {e}")
             raise
+    
+    async def refund_coin(self, user_id: str, amount: int = 1) -> int:
+        """
+        Refund coin to user using atomic transaction to prevent race conditions.
+        Used as a rollback mechanism when generation fails.
+        """
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+
+        @firestore.async_transactional
+        async def atomic_refund(transaction, user_ref, amount):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+            
+            balance = snapshot.get("coin_balance")
+            new_balance = balance + amount
+            transaction.update(user_ref, {
+                "coin_balance": new_balance,
+                "updated_at": datetime.now(timezone.utc)
+            })
+            return new_balance
+
+        try:
+            new_balance = await atomic_refund(transaction, user_ref, amount)
+            logger.info(f"Refunded {amount} coins to {user_id}. New balance: {new_balance}")
+            return new_balance
+        except Exception as e:
+            logger.error(f"Failed to refund coin for {user_id}: {e}")
+            raise
