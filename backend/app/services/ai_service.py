@@ -52,19 +52,20 @@ class AIService:
 
     def __init__(self) -> None:
         try:
-            vertexai.init(project=settings.PROJECT_ID)
-            self.model = GenerativeModel("gemini-1.5-flash")
+            vertexai.init(project=settings.PROJECT_ID, location=settings.VERTEX_LOCATION)
+            self.model = GenerativeModel(settings.VERTEX_MODEL)
             logger.info("Vertex AI model initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize Vertex AI: {e}")
             raise e
 
     def _resolve_style_prompt(self, style_id: str) -> str:
-        if style_id == "chibi_2d":
+        normalized = style_id.strip().lower()
+        if normalized in {"chibi_2d", "chibi-2d", "chibi 2d", "chibi2d", "2d"}:
             return self.LOCKED_PROMPT_CHIBI_2D
-        if style_id == "pixar_3d":
+        if normalized in {"pixar_3d", "pixar-3d", "pixar 3d", "pixar3d", "3d"}:
             return self.LOCKED_PROMPT_PIXAR_3D
-        raise ValueError(f"Unsupported style_id: {style_id}")
+        raise ValueError(f"Unsupported style_id: {style_id}. Expected chibi_2d or pixar_3d.")
 
     def _build_text_instruction(self, extra_prompt: Optional[str]) -> str:
         no_text_requested = bool(extra_prompt and self.NO_TEXT_PATTERN.search(extra_prompt))

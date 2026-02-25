@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     LINE_CHANNEL_SECRET: str
     OMISE_SECRET_KEY: str
     OMISE_PUBLIC_KEY: str
+    VERTEX_MODEL: str = "gemini-3-pro-image-preview"
+    VERTEX_LOCATION: str = "global"
 
     model_config = SettingsConfigDict(
         env_file=".env",
