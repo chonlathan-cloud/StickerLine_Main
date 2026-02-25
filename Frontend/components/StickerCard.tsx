@@ -2,16 +2,17 @@ import React from 'react';
 import { GeneratedSticker } from '../types';
 
 interface StickerCardProps {
-  sticker: GeneratedSticker;
+  sticker: GeneratedSticker | string;
   index: number;
 }
 
 export const StickerCard: React.FC<StickerCardProps> = ({ sticker, index }) => {
   const stickerNumber = index + 1;
+  const stickerUrl = typeof sticker === 'string' ? sticker : sticker.url;
 
   const downloadImage = () => {
     const link = document.createElement('a');
-    link.href = sticker.url;
+    link.href = stickerUrl;
     link.download = `sticker-transparent-${stickerNumber}.png`;
     document.body.appendChild(link);
     link.click();
@@ -22,7 +23,7 @@ export const StickerCard: React.FC<StickerCardProps> = ({ sticker, index }) => {
     <article className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
       <div className="relative flex aspect-square items-center justify-center bg-slate-50 p-4">
         <img
-          src={sticker.url}
+          src={stickerUrl}
           alt={`Sticker preview ${stickerNumber}`}
           className="max-h-full max-w-full object-contain"
         />
