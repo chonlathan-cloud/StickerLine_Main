@@ -1,9 +1,15 @@
 import axios from 'axios';
 
+const baseURL = (import.meta as any).env?.VITE_API_BASE_URL;
 const API = axios.create({
-  baseURL: (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080',
+  baseURL: baseURL ?? 'http://localhost:8080',
   headers: { 'Content-Type': 'application/json' },
 });
+
+//const API = axios.create({
+//  baseURL: (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080',
+//  headers: { 'Content-Type': 'application/json' },
+//});
 
 /** Upload a Base64 image to the backend, which stores it on GCS. */
 export async function uploadImage(base64Str: string, filename: string = 'selfie.jpg') {
