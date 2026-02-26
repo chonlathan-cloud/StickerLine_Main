@@ -28,7 +28,9 @@ class AIService:
         "High-resolution professional art, sharp clean outlines, no die-cut border, no white outline, "
         "no green spill on character edges, solid #00FF00 green background for transparency, 4x4 grid layout, "
         "16 distinct poses, consistent character design, center-aligned characters, LINE sticker compliant style, "
-        "safe margin in every cell, 2K generation quality."
+        "safe margin in every cell, 2K generation quality. "
+        "Add clear #00FF00 gutters between cells (8–12px). No elements may cross cell boundaries. "
+        "Each sticker must be fully contained inside its own cell."
     )
     DEFAULT_THAI_CAPTIONS = [
         "สวัสดี",

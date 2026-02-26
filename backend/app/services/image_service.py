@@ -41,6 +41,7 @@ class ImageProcessor:
                     x_end = x_edges[col + 1]
 
                     slice_img = grid_img[y_start:y_end, x_start:x_end]
+                    slice_img = self._apply_safe_inset(slice_img, inset_ratio=0.03)
                     
                     # Step C: Process each slice
                     output_bytes = self._process_single_sticker(slice_img)
@@ -50,6 +51,21 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"Error processing sticker grid: {e}")
             raise e
+
+    def _apply_safe_inset(self, cv_img: np.ndarray, inset_ratio: float = 0.02) -> np.ndarray:
+        """
+        Trim a small inset from each cell to avoid bleed from adjacent cells.
+        """
+        height, width = cv_img.shape[:2]
+        inset_x = int(round(width * inset_ratio))
+        inset_y = int(round(height * inset_ratio))
+        if inset_x <= 0 and inset_y <= 0:
+            return cv_img
+        x_start = min(inset_x, width - 1)
+        y_start = min(inset_y, height - 1)
+        x_end = max(width - inset_x, x_start + 1)
+        y_end = max(height - inset_y, y_start + 1)
+        return cv_img[y_start:y_end, x_start:x_end]
 
     def _equal_edges(self, size: int) -> np.ndarray:
         edges = np.linspace(0, size, 5).round().astype(int)
