@@ -26,17 +26,28 @@ export async function startGeneration(
   gcsUri: string,
   style: string,
   prompt: string,
+  lockedIndices: number[] = [],
 ) {
-  const { data } = await API.post<{ job_id: string; status: string; result_urls?: string[] }>(
+  const { data } = await API.post<{
+    job_id: string;
+    status: string;
+    result_urls?: string[];
+    result_slots?: Array<{ index: number; url: string; locked: boolean }>;
+  }>(
     '/api/v1/jobs/generate',
-    { user_id: userId, image_uri: gcsUri, style, prompt },
+    { user_id: userId, image_uri: gcsUri, style, prompt, locked_indices: lockedIndices },
   );
   return data;
 }
 
 /** Poll the backend for the status of a generation job. */
 export async function checkJobStatus(jobId: string) {
-  const { data } = await API.get<{ status: string; result_urls?: string[] }>(
+  const { data } = await API.get<{
+    status: string;
+    job_id?: string;
+    result_slots?: Array<{ index: number; url: string; locked: boolean }>;
+    error?: string;
+  }>(
     `/api/v1/jobs/${jobId}`,
   );
   return data;
@@ -76,5 +87,27 @@ export async function getPaymentStatus(chargeId: string) {
     qr_image_url?: string | null;
     expires_at?: string | null;
   }>(`/api/v1/payments/status?charge_id=${encodeURIComponent(chargeId)}`);
+  return data;
+}
+
+export async function getCurrentStickers(userId: string) {
+  const { data } = await API.get<{
+    status: 'ok' | 'empty';
+    job_id?: string | null;
+    result_slots?: Array<{ index: number; url: string; locked: boolean }>;
+  }>(`/api/v1/jobs/current?user_id=${encodeURIComponent(userId)}`);
+  return data;
+}
+
+export async function resetCurrentStickers(userId: string) {
+  const { data } = await API.post<{ status: string }>('/api/v1/jobs/reset', { user_id: userId });
+  return data;
+}
+
+export async function downloadCurrentStickersZip(userId: string) {
+  const { data } = await API.get<Blob>(
+    `/api/v1/jobs/current/download?user_id=${encodeURIComponent(userId)}`,
+    { responseType: 'blob' },
+  );
   return data;
 }

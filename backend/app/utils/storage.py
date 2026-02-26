@@ -38,3 +38,20 @@ class StorageClient:
         except Exception as e:
             logger.error(f"Failed to upload file to GCS: {e}")
             raise e
+
+    def list_blobs(self, prefix: str) -> list[storage.Blob]:
+        """
+        List blobs in the bucket by prefix.
+        """
+        return list(self.bucket.list_blobs(prefix=prefix))
+
+    def generate_signed_url(self, blob_name: str, expires_hours: int = 1) -> str:
+        """
+        Generate a signed URL for an existing blob.
+        """
+        blob = self.bucket.blob(blob_name)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(hours=expires_hours),
+            method="GET"
+        )

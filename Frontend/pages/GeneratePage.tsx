@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { StickerStyle, StickerSheetConfig } from '../types';
-import { uploadImage, startGeneration } from '../api/client';
+import { downloadCurrentStickersZip, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
 import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
@@ -54,6 +54,8 @@ const GeneratePage: React.FC = () => {
   const [generationTargetCount, setGenerationTargetCount] = useState(TOTAL_STICKERS);
   const [isComplianceChecking, setIsComplianceChecking] = useState(false);
   const [isPromptExpanded, setIsPromptExpanded] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const [config, setConfig] = useState<StickerSheetConfig>({
     base64Image: '',
@@ -99,6 +101,31 @@ const GeneratePage: React.FC = () => {
     return () => window.clearInterval(interval);
   }, [loading, processingStep, generationTargetCount]);
 
+  useEffect(() => {
+    const loadCurrentSet = async () => {
+      if (!profile?.userId) return;
+      try {
+        const data = await getCurrentStickers(profile.userId);
+        if (data.status === 'ok' && data.result_slots && data.result_slots.length === TOTAL_STICKERS) {
+          const now = Date.now();
+          const slots = data.result_slots.map((slot, index) => ({
+            id: `${data.job_id ?? now}-${index}`,
+            url: slot.url,
+            locked: slot.locked,
+          }));
+          setStickerSlots(slots);
+          setTransparentImageUrl(slots[0]?.url ?? null);
+          setHasGenerated(true);
+          setJobId(data.job_id ?? null);
+        }
+      } catch {
+        // Non-blocking: ignore load failures for current set
+      }
+    };
+
+    loadCurrentSet();
+  }, [profile?.userId]);
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -115,8 +142,12 @@ const GeneratePage: React.FC = () => {
         setHasGenerated(false);
         setTransparentImageUrl(null);
         setStickerSlots([]);
+        setJobId(null);
         setGenerationTargetCount(TOTAL_STICKERS);
         setError(null);
+        if (profile?.userId) {
+          resetCurrentStickers(profile.userId).catch(() => null);
+        }
       }
     };
 
@@ -157,6 +188,22 @@ const GeneratePage: React.FC = () => {
     setLoading(true);
     setProcessingStep('analyzing');
     setError(null);
+    setJobId(null);
+
+    const pollUntilComplete = async (jobId: string) => {
+      const maxAttempts = 60;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const statusResp = await checkJobStatus(jobId);
+        if (statusResp.status === 'completed' && statusResp.result_slots) {
+          return statusResp;
+        }
+        if (statusResp.status === 'failed') {
+          throw new Error(statusResp.error || 'Generation failed.');
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+      throw new Error('Generation is taking longer than expected. Please try again.');
+    };
 
     try {
       // Step 1: Upload Image to Backend -> GCS
@@ -165,31 +212,29 @@ const GeneratePage: React.FC = () => {
 
       // Step 2: Start Generation Job on backend
       setProcessingStep('generating');
-      const jobResp = await startGeneration(profile.userId, gcsUri, config.style, config.extraPrompt);
+      const lockedIndices = stickerSlots
+        .map((slot, index) => (slot.locked ? index : null))
+        .filter((index): index is number => index !== null);
+
+      const jobResp = await startGeneration(profile.userId, gcsUri, config.style, config.extraPrompt, lockedIndices);
 
       // The current backend returns result_urls directly (synchronous flow)
-      if (jobResp.status === 'completed' && jobResp.result_urls) {
-        const resultUrls = jobResp.result_urls;
+      let resolved = jobResp;
+      if (jobResp.status !== 'completed' && jobResp.job_id) {
+        resolved = await pollUntilComplete(jobResp.job_id);
+      }
 
-        if (resultUrls.length < TOTAL_STICKERS) {
-          throw new Error('Generated sheet is incomplete. Please try again.');
-        }
-
+      if (resolved.status === 'completed' && resolved.result_slots && resolved.result_slots.length >= TOTAL_STICKERS) {
         const now = Date.now();
-        const mergedSlots: StickerSlot[] = canReuseExisting
-          ? stickerSlots.map((slot, index) =>
-            slot.locked
-              ? slot
-              : { ...slot, url: resultUrls[index], id: `${now}-${index}` }
-          )
-          : resultUrls.slice(0, TOTAL_STICKERS).map((url, index) => ({
-            id: `${now}-${index}`,
-            url,
-            locked: false,
-          }));
+        const slots = resolved.result_slots.slice(0, TOTAL_STICKERS).map((slot, index) => ({
+          id: `${resolved.job_id ?? now}-${index}`,
+          url: slot.url,
+          locked: slot.locked,
+        }));
 
-        setStickerSlots(mergedSlots);
-        setTransparentImageUrl(resultUrls[0]); // Use first sticker as preview
+        setStickerSlots(slots);
+        setJobId(resolved.job_id || null);
+        setTransparentImageUrl(slots[0]?.url ?? null);
         setHasGenerated(true);
         setProcessingStep('complete');
 
@@ -224,14 +269,35 @@ const GeneratePage: React.FC = () => {
     setError(null);
   };
 
-  const handleDownload = () => {
-    if (!transparentImageUrl) return;
-    const link = document.createElement('a');
-    link.href = transparentImageUrl;
-    link.download = `line-sticker-sheet-${Date.now()}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const sanitizeFileName = (value: string) => {
+    const cleaned = value.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '');
+    return cleaned || 'stickers';
+  };
+
+  const handleDownload = async () => {
+    if (!profile?.userId || stickerSlots.length !== TOTAL_STICKERS) {
+      setError('Download is not ready yet. Please generate stickers first.');
+      return;
+    }
+
+    try {
+      setIsDownloading(true);
+      const blob = await downloadCurrentStickersZip(profile.userId);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const displayName = profile?.displayName || 'stickers';
+      link.href = url;
+      link.download = `stickers_${sanitizeFileName(displayName)}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      const message = err?.response?.data?.detail || err?.message || 'Failed to download stickers.';
+      setError(message);
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
@@ -568,9 +634,10 @@ const GeneratePage: React.FC = () => {
             <button
               type="button"
               onClick={handleDownload}
-              className="focus-ring mt-4 min-h-11 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-900 hover:border-indigo-500 hover:text-indigo-700"
+              disabled={isDownloading || stickerSlots.length !== TOTAL_STICKERS}
+              className="focus-ring mt-4 min-h-11 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-900 hover:border-indigo-500 hover:text-indigo-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
             >
-              Download PNG
+              {isDownloading ? 'Preparing ZIP...' : 'Download ZIP'}
             </button>
           </section>
         )}

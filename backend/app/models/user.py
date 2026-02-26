@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict
 from datetime import datetime, timezone
 
 def get_utc_now():
@@ -19,3 +19,6 @@ class UserInDB(UserBase):
     is_free_trial_used: bool = False
     created_at: datetime = Field(default_factory=get_utc_now)
     updated_at: datetime = Field(default_factory=get_utc_now)
+    current_stickers: Optional[List[Dict]] = None
+    current_stickers_job_id: Optional[str] = None
+    current_stickers_updated_at: Optional[datetime] = None

@@ -1,10 +1,13 @@
+import asyncio
 import base64
 import logging
+import random
 import re
 from typing import Optional
 
 import vertexai
-from vertexai.generative_models import GenerativeModel, Part
+from google.api_core import exceptions as gax_exceptions
+from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
 
 from app.core.config import settings
 
@@ -54,6 +57,11 @@ class AIService:
         try:
             vertexai.init(project=settings.PROJECT_ID, location=settings.VERTEX_LOCATION)
             self.model = GenerativeModel(settings.VERTEX_MODEL)
+            self.generation_config = GenerationConfig(
+                response_modalities=[GenerationConfig.Modality.IMAGE]
+            )
+            self.max_retries = max(0, settings.GENERATION_MAX_RETRIES)
+            self.retry_base_delay = max(0.1, float(settings.GENERATION_RETRY_BASE_DELAY))
             logger.info("Vertex AI model initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize Vertex AI: {e}")
@@ -114,8 +122,9 @@ class AIService:
             ).strip()
 
             image_part = Part.from_uri(image_uri, mime_type="image/jpeg")
-            response = await self.model.generate_content_async(
-                contents=[image_part, full_prompt]
+            response = await self._generate_with_retry(
+                contents=[image_part, full_prompt],
+                generation_config=self.generation_config,
             )
 
             candidates = response.candidates or []
@@ -126,10 +135,65 @@ class AIService:
                 if part.inline_data:
                     return part.inline_data.data
 
-            if getattr(response, "text", None):
-                return base64.b64decode(response.text.strip())
+            response_text = getattr(response, "text", None)
+            if response_text:
+                cleaned_text = response_text.strip()
+                if self._looks_like_base64(cleaned_text):
+                    return base64.b64decode(cleaned_text)
+                logger.warning(
+                    "Vertex AI returned text instead of image data. text_preview=%s",
+                    cleaned_text[:200].replace("\n", " "),
+                )
+
+            # Debug logging to help diagnose missing image data
+            try:
+                first_candidate = candidates[0]
+                parts = getattr(first_candidate.content, "parts", []) or []
+                part_types = [
+                    "inline_data" if getattr(p, "inline_data", None) else "text" if getattr(p, "text", None) else "other"
+                    for p in parts
+                ]
+                logger.warning(
+                    "Vertex AI returned no image data. model=%s candidates=%d parts=%s finish_reason=%s",
+                    settings.VERTEX_MODEL,
+                    len(candidates),
+                    part_types,
+                    getattr(first_candidate, "finish_reason", None),
+                )
+            except Exception:
+                logger.warning("Vertex AI returned no image data (debug log failed).")
 
             raise ValueError("API returned success but no image data was found.")
         except Exception as e:
             logger.error(f"Error generating sticker grid: {e}")
             raise e
+
+    async def _generate_with_retry(self, **kwargs):
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await self.model.generate_content_async(**kwargs)
+            except Exception as e:
+                if not self._is_retryable_error(e) or attempt >= self.max_retries:
+                    raise
+                delay = self.retry_base_delay * (2 ** attempt)
+                delay += random.uniform(0, delay * 0.25)
+                logger.warning("Vertex AI rate limit hit. Retrying in %.2fs (attempt %d/%d)", delay, attempt + 1, self.max_retries)
+                await asyncio.sleep(delay)
+
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        if isinstance(error, (gax_exceptions.ResourceExhausted, gax_exceptions.TooManyRequests, gax_exceptions.ServiceUnavailable)):
+            return True
+        message = str(error).lower()
+        return "429" in message or "resource exhausted" in message or "too many requests" in message
+
+    @staticmethod
+    def _looks_like_base64(value: str) -> bool:
+        if not value:
+            return False
+        # Base64 should be ASCII only and length divisible by 4
+        if len(value) % 4 != 0:
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9+/=\s]+", value):
+            return False
+        return True

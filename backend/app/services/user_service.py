@@ -31,6 +31,9 @@ class UserService:
                 coin_balance=2,
                 total_spent_thb=0.0,
                 is_free_trial_used=True,
+                current_stickers=[],
+                current_stickers_job_id=None,
+                current_stickers_updated_at=None,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
@@ -52,6 +55,39 @@ class UserService:
             user_data.update(update_data)
             logger.info(f"Updated existing user: {line_profile.line_id}")
             return user_data
+
+    async def get_current_stickers(self, user_id: str) -> tuple[list[dict], str | None]:
+        """
+        Fetch the user's current sticker set and associated job ID.
+        Returns (slots, job_id). Slots may be empty if none exist.
+        """
+        user_ref = self.users_collection.document(user_id)
+        snapshot = await user_ref.get()
+        if not snapshot.exists:
+            raise ValueError(f"User {user_id} not found")
+
+        data = snapshot.to_dict() or {}
+        slots = data.get("current_stickers") or []
+        job_id = data.get("current_stickers_job_id")
+        return slots, job_id
+
+    async def set_current_stickers(self, user_id: str, slots: list[dict], job_id: str | None) -> None:
+        """
+        Persist the user's current sticker set in Firestore.
+        """
+        user_ref = self.users_collection.document(user_id)
+        await user_ref.update({
+            "current_stickers": slots,
+            "current_stickers_job_id": job_id,
+            "current_stickers_updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        })
+
+    async def reset_current_stickers(self, user_id: str) -> None:
+        """
+        Clear the current sticker set when a new source image is uploaded.
+        """
+        await self.set_current_stickers(user_id, [], None)
 
     async def deduct_coin(self, user_id: str, amount: int = 1) -> int:
         """
