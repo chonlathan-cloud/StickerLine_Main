@@ -133,8 +133,9 @@ class UserService:
                 raise ValueError(f"User {user_id} not found")
             
             # Update user balances
-            current_coins = snapshot.get("coin_balance")
-            current_spent = snapshot.get("total_spent_thb", 0.0)
+            data = snapshot.to_dict() or {}
+            current_coins = data.get("coin_balance", 0)
+            current_spent = data.get("total_spent_thb", 0.0)
             
             new_coins = current_coins + coins
             new_spent = current_spent + thb_amount

@@ -51,3 +51,30 @@ export async function syncUser(lineProfile: {
   const { data } = await API.post('/api/v1/auth/sync', lineProfile);
   return data;
 }
+
+export async function createPayment(userId: string, packageId: string) {
+  const { data } = await API.post<{
+    charge_id: string;
+    status: string;
+    amount_satang: number;
+    coins: number;
+    qr_image_url: string;
+    expires_at?: string | null;
+  }>('/api/v1/payments/create', {
+    user_id: userId,
+    package_id: packageId,
+  });
+  return data;
+}
+
+export async function getPaymentStatus(chargeId: string) {
+  const { data } = await API.get<{
+    charge_id: string;
+    status: string;
+    coins: number;
+    amount_satang: number;
+    qr_image_url?: string | null;
+    expires_at?: string | null;
+  }>(`/api/v1/payments/status?charge_id=${encodeURIComponent(chargeId)}`);
+  return data;
+}

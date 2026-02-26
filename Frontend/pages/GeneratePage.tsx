@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { StickerStyle, StickerSheetConfig } from '../types';
 import { uploadImage, startGeneration } from '../api/client';
 import { PageLayout } from '../components/PageLayout';
@@ -48,7 +49,7 @@ const GeneratePage: React.FC = () => {
   const [stickerSlots, setStickerSlots] = useState<StickerSlot[]>([]);
   const [hasGenerated, setHasGenerated] = useState(false);
   const isOnline = useOnlineStatus();
-  const { profile } = useAuth();
+  const { profile, coinBalance } = useAuth();
   const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
   const [generationTargetCount, setGenerationTargetCount] = useState(TOTAL_STICKERS);
   const [isComplianceChecking, setIsComplianceChecking] = useState(false);
@@ -233,8 +234,6 @@ const GeneratePage: React.FC = () => {
     document.body.removeChild(link);
   };
 
-
-
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
   const unlockedCount = stickerSlots.length > 0 ? stickerSlots.length - lockedCount : TOTAL_STICKERS;
   const generateButtonLabel = loading
@@ -286,6 +285,20 @@ const GeneratePage: React.FC = () => {
   return (
     <PageLayout isOnline={isOnline}>
       <main id="main-content" className="mx-auto flex w-full max-w-md flex-col gap-3 px-4 pb-6 pt-3 sm:max-w-xl" aria-busy={loading}>
+        <section className="flex flex-wrap items-center justify-between gap-3 rounded-[2.5rem] border border-slate-200 bg-white p-5 shadow-sm">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Your Balance</p>
+            <p className="mt-1 text-2xl font-semibold text-slate-900">
+              {coinBalance ?? 0} Coins
+            </p>
+          </div>
+          <Link
+            to="/payment"
+            className="focus-ring min-h-11 rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+          >
+            เติมเงิน
+          </Link>
+        </section>
         <section className="overflow-hidden rounded-[2.5rem] border border-slate-200 bg-white shadow-sm" aria-labelledby="upload-heading">
           <h2 id="upload-heading" className="sr-only">
             Source photo

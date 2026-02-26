@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import GeneratePage from './pages/GeneratePage';
 import LoginPage from './pages/LoginPage';
+import PaymentPage from './pages/PaymentPage';
 import { useAuth } from './providers/AuthProvider';
 import { PageLayout } from './components/PageLayout';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
@@ -50,6 +51,14 @@ const App: React.FC = () => {
         element={
           <RequireAuth>
             <GeneratePage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/payment"
+        element={
+          <RequireAuth>
+            <PaymentPage />
           </RequireAuth>
         }
       />
