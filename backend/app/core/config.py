@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     OMISE_PUBLIC_KEY: str
     VERTEX_MODEL: str = "gemini-3-pro-image-preview"
     VERTEX_LOCATION: str = "global"
+    GENAI_PROVIDER: str = "vertex"
+    GEMINI_API_KEY: str | None = None
+    GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com"
+    GEMINI_IMAGE_ASPECT_RATIO: str = "1:1"
+    GEMINI_IMAGE_SIZE: str = "2K"
+    GENAI_FALLBACK_PROVIDER: str = "gemini_api"
+    GENAI_FALLBACK_MAX_RETRIES: int = 2
     GENERATION_CONCURRENCY: int = 1
     GENERATION_COOLDOWN_SECONDS: int = 30
     GENERATION_MAX_RETRIES: int = 8

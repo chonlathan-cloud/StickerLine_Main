@@ -55,3 +55,19 @@ class StorageClient:
             expiration=datetime.timedelta(hours=expires_hours),
             method="GET"
         )
+
+    def download_gcs_uri(self, gcs_uri: str) -> bytes:
+        """
+        Download a blob by its gs:// URI and return bytes.
+        """
+        if not gcs_uri.startswith("gs://"):
+            raise ValueError(f"Invalid GCS URI: {gcs_uri}")
+
+        path = gcs_uri[len("gs://"):]
+        if "/" not in path:
+            raise ValueError(f"Invalid GCS URI: {gcs_uri}")
+
+        bucket_name, blob_name = path.split("/", 1)
+        bucket = self.client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        return blob.download_as_bytes()

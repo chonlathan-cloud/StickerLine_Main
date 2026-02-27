@@ -3,13 +3,15 @@ import base64
 import logging
 import random
 import re
-from typing import Optional
+from typing import Optional, Callable, Awaitable, Any
 
+import httpx
 import vertexai
 from google.api_core import exceptions as gax_exceptions
 from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
 
 from app.core.config import settings
+from app.utils.storage import StorageClient
 
 logger = logging.getLogger(__name__)
 
@@ -54,19 +56,40 @@ class AIService:
         r"(no text|without text|no caption|ไม่มีข้อความ|ไม่ต้องมีข้อความ|ไม่มีแคปชัน)",
         re.IGNORECASE,
     )
+    GEMINI_PROVIDER_ALIASES = {"gemini_api", "gemini", "ai_studio", "genai"}
+    RATE_LIMIT_USER_MESSAGE = "ระบบหนาแน่น กรุณารอ 5 นาที แล้วลองใหม่"
 
     def __init__(self) -> None:
+        self.provider = (settings.GENAI_PROVIDER or "vertex").strip().lower()
+        if self.provider == "auto":
+            self.provider = "gemini_api" if settings.GEMINI_API_KEY else "vertex"
+
+        self.max_retries = max(0, settings.GENERATION_MAX_RETRIES)
+        self.retry_base_delay = max(0.1, float(settings.GENERATION_RETRY_BASE_DELAY))
+        self.fallback_provider = (settings.GENAI_FALLBACK_PROVIDER or "").strip().lower()
+        self.fallback_max_retries = max(0, settings.GENAI_FALLBACK_MAX_RETRIES)
+        self.gemini_api_key = settings.GEMINI_API_KEY
+        self.gemini_api_base_url = settings.GEMINI_API_BASE_URL.rstrip("/")
+        self.model_id = settings.VERTEX_MODEL
+
         try:
-            vertexai.init(project=settings.PROJECT_ID, location=settings.VERTEX_LOCATION)
-            self.model = GenerativeModel(settings.VERTEX_MODEL)
-            self.generation_config = GenerationConfig(
-                response_modalities=[GenerationConfig.Modality.IMAGE]
-            )
-            self.max_retries = max(0, settings.GENERATION_MAX_RETRIES)
-            self.retry_base_delay = max(0.1, float(settings.GENERATION_RETRY_BASE_DELAY))
-            logger.info("Vertex AI model initialized.")
+            if self.provider in self.GEMINI_PROVIDER_ALIASES:
+                if not self.gemini_api_key:
+                    raise ValueError("GEMINI_API_KEY is required when GENAI_PROVIDER=gemini_api.")
+                self.model = None
+                self.generation_config = None
+                logger.info("Gemini API (AI Studio) client initialized.")
+            elif self.provider == "vertex":
+                vertexai.init(project=settings.PROJECT_ID, location=settings.VERTEX_LOCATION)
+                self.model = GenerativeModel(self.model_id)
+                self.generation_config = GenerationConfig(
+                    response_modalities=[GenerationConfig.Modality.IMAGE]
+                )
+                logger.info("Vertex AI model initialized.")
+            else:
+                raise ValueError(f"Unsupported GENAI_PROVIDER: {self.provider}")
         except Exception as e:
-            logger.error(f"Failed to initialize Vertex AI: {e}")
+            logger.error(f"Failed to initialize AI provider ({self.provider}): {e}")
             raise e
 
     def _resolve_style_prompt(self, style_id: str) -> str:
@@ -123,71 +146,233 @@ class AIService:
                 "Character should be positioned clearly in each grid cell."
             ).strip()
 
-            image_part = Part.from_uri(image_uri, mime_type="image/jpeg")
-            response = await self._generate_with_retry(
-                contents=[image_part, full_prompt],
-                generation_config=self.generation_config,
-            )
-
-            candidates = response.candidates or []
-            if not candidates:
-                raise ValueError("No candidates returned from AI model.")
-
-            for part in candidates[0].content.parts:
-                if part.inline_data:
-                    return part.inline_data.data
-
-            response_text = getattr(response, "text", None)
-            if response_text:
-                cleaned_text = response_text.strip()
-                if self._looks_like_base64(cleaned_text):
-                    return base64.b64decode(cleaned_text)
-                logger.warning(
-                    "Vertex AI returned text instead of image data. text_preview=%s",
-                    cleaned_text[:200].replace("\n", " "),
+            if self.provider in self.GEMINI_PROVIDER_ALIASES:
+                return await self._generate_with_gemini_api(
+                    image_uri=image_uri,
+                    prompt=full_prompt,
+                    max_retries=self.max_retries,
+                    provider_label="Gemini API",
                 )
 
-            # Debug logging to help diagnose missing image data
             try:
-                first_candidate = candidates[0]
-                parts = getattr(first_candidate.content, "parts", []) or []
-                part_types = [
-                    "inline_data" if getattr(p, "inline_data", None) else "text" if getattr(p, "text", None) else "other"
-                    for p in parts
-                ]
-                logger.warning(
-                    "Vertex AI returned no image data. model=%s candidates=%d parts=%s finish_reason=%s",
-                    settings.VERTEX_MODEL,
-                    len(candidates),
-                    part_types,
-                    getattr(first_candidate, "finish_reason", None),
+                return await self._generate_with_vertex(
+                    image_uri=image_uri,
+                    prompt=full_prompt,
+                    max_retries=self.max_retries,
+                    provider_label="Vertex AI",
                 )
-            except Exception:
-                logger.warning("Vertex AI returned no image data (debug log failed).")
+            except Exception as e:
+                if not self._is_retryable_error(e):
+                    raise
 
-            raise ValueError("API returned success but no image data was found.")
+                if self.fallback_provider in self.GEMINI_PROVIDER_ALIASES and self.gemini_api_key:
+                    logger.warning("Vertex AI exhausted. Falling back to Gemini API.")
+                    try:
+                        return await self._generate_with_gemini_api(
+                            image_uri=image_uri,
+                            prompt=full_prompt,
+                            max_retries=self.fallback_max_retries,
+                            provider_label="Gemini API (fallback)",
+                        )
+                    except Exception as fallback_error:
+                        if self._is_retryable_error(fallback_error):
+                            raise RuntimeError(self.RATE_LIMIT_USER_MESSAGE) from fallback_error
+                        raise
+
+                raise RuntimeError(self.RATE_LIMIT_USER_MESSAGE) from e
         except Exception as e:
             logger.error(f"Error generating sticker grid: {e}")
             raise e
 
-    async def _generate_with_retry(self, **kwargs):
-        for attempt in range(self.max_retries + 1):
+    async def _generate_with_vertex(
+        self,
+        image_uri: str,
+        prompt: str,
+        max_retries: Optional[int] = None,
+        provider_label: str = "Vertex AI",
+    ) -> bytes:
+        image_part = Part.from_uri(image_uri, mime_type="image/jpeg")
+
+        async def _call():
+            return await self.model.generate_content_async(
+                contents=[image_part, prompt],
+                generation_config=self.generation_config,
+            )
+
+        response = await self._generate_with_retry(
+            _call,
+            max_retries=max_retries,
+            provider_label=provider_label,
+        )
+
+        candidates = response.candidates or []
+        if not candidates:
+            raise ValueError("No candidates returned from AI model.")
+
+        for part in candidates[0].content.parts:
+            if part.inline_data:
+                return part.inline_data.data
+
+        response_text = getattr(response, "text", None)
+        if response_text:
+            cleaned_text = response_text.strip()
+            if self._looks_like_base64(cleaned_text):
+                return base64.b64decode(cleaned_text)
+            logger.warning(
+                "Vertex AI returned text instead of image data. text_preview=%s",
+                cleaned_text[:200].replace("\n", " "),
+            )
+
+        # Debug logging to help diagnose missing image data
+        try:
+            first_candidate = candidates[0]
+            parts = getattr(first_candidate.content, "parts", []) or []
+            part_types = [
+                "inline_data" if getattr(p, "inline_data", None) else "text" if getattr(p, "text", None) else "other"
+                for p in parts
+            ]
+            logger.warning(
+                "Vertex AI returned no image data. model=%s candidates=%d parts=%s finish_reason=%s",
+                self.model_id,
+                len(candidates),
+                part_types,
+                getattr(first_candidate, "finish_reason", None),
+            )
+        except Exception:
+            logger.warning("Vertex AI returned no image data (debug log failed).")
+
+        raise ValueError("API returned success but no image data was found.")
+
+    async def _generate_with_gemini_api(
+        self,
+        image_uri: str,
+        prompt: str,
+        max_retries: Optional[int] = None,
+        provider_label: str = "Gemini API",
+    ) -> bytes:
+        image_bytes = await self._load_image_bytes(image_uri)
+        mime_type = self._guess_mime_type(image_bytes)
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"inlineData": {"mimeType": mime_type, "data": image_b64}},
+                        {"text": prompt},
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {
+                    "aspectRatio": settings.GEMINI_IMAGE_ASPECT_RATIO,
+                    "imageSize": settings.GEMINI_IMAGE_SIZE,
+                },
+            },
+        }
+
+        async def _call():
+            return await self._request_gemini_api(payload)
+
+        data = await self._generate_with_retry(
+            _call,
+            max_retries=max_retries,
+            provider_label=provider_label,
+        )
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise ValueError("No candidates returned from Gemini API.")
+
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        for part in parts:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                return base64.b64decode(inline["data"])
+
+        raise ValueError("API returned success but no image data was found.")
+
+    async def _request_gemini_api(self, payload: dict) -> dict:
+        url = f"{self.gemini_api_base_url}/v1beta/models/{self.model_id}:generateContent"
+        params = {"key": self.gemini_api_key}
+        timeout = httpx.Timeout(120.0)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, params=params, json=payload)
+
+        if response.status_code in {429, 500, 502, 503, 504}:
+            raise RuntimeError(f"{response.status_code} Resource exhausted or service unavailable.")
+
+        if response.status_code >= 400:
+            raise RuntimeError(f"Gemini API error {response.status_code}: {response.text}")
+
+        data = response.json()
+        error = data.get("error")
+        if error:
+            status_value = str(error.get("status") or "").upper()
+            message = error.get("message") or "Gemini API error."
+            if "RESOURCE_EXHAUSTED" in status_value or "429" in message:
+                raise RuntimeError(f"429 Resource exhausted. {message}")
+            raise RuntimeError(message)
+
+        return data
+
+    async def _generate_with_retry(
+        self,
+        call: Callable[[], Awaitable[Any]],
+        max_retries: Optional[int] = None,
+        provider_label: str = "AI",
+    ) -> Any:
+        retries = self.max_retries if max_retries is None else max(0, max_retries)
+        for attempt in range(retries + 1):
             try:
-                return await self.model.generate_content_async(**kwargs)
+                return await call()
             except Exception as e:
-                if not self._is_retryable_error(e) or attempt >= self.max_retries:
+                if not self._is_retryable_error(e) or attempt >= retries:
                     raise
                 delay = self.retry_base_delay * (2 ** attempt)
                 delay += random.uniform(0, delay * 0.25)
-                logger.warning("Vertex AI rate limit hit. Retrying in %.2fs (attempt %d/%d)", delay, attempt + 1, self.max_retries)
+                logger.warning(
+                    "%s rate limit hit. Retrying in %.2fs (attempt %d/%d)",
+                    provider_label,
+                    delay,
+                    attempt + 1,
+                    retries,
+                )
                 await asyncio.sleep(delay)
+
+    async def _load_image_bytes(self, image_uri: str) -> bytes:
+        if image_uri.startswith("gs://"):
+            storage_client = StorageClient()
+            return await asyncio.to_thread(storage_client.download_gcs_uri, image_uri)
+
+        if image_uri.startswith("http://") or image_uri.startswith("https://"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(image_uri)
+                response.raise_for_status()
+                return response.content
+
+        if image_uri.startswith("data:image"):
+            base64_data = image_uri.split(",", 1)[-1]
+            return base64.b64decode(base64_data)
+
+        raise ValueError(f"Unsupported image URI: {image_uri}")
 
     @staticmethod
     def _is_retryable_error(error: Exception) -> bool:
         if isinstance(error, (gax_exceptions.ResourceExhausted, gax_exceptions.TooManyRequests, gax_exceptions.ServiceUnavailable)):
             return True
         message = str(error).lower()
-        return "429" in message or "resource exhausted" in message or "too many requests" in message
+        return (
+            "429" in message
+            or "resource exhausted" in message
+            or "too many requests" in message
+            or "service unavailable" in message
+            or "unavailable" in message
+            or "gateway timeout" in message
+            or "timeout" in message
+        )
 
     @staticmethod
     def _looks_like_base64(value: str) -> bool:
@@ -199,3 +384,13 @@ class AIService:
         if not re.fullmatch(r"[A-Za-z0-9+/=\s]+", value):
             return False
         return True
+
+    @staticmethod
+    def _guess_mime_type(image_bytes: bytes) -> str:
+        if image_bytes[:2] == b"\xff\xd8":
+            return "image/jpeg"
+        if image_bytes[:4] == b"\x89PNG":
+            return "image/png"
+        if image_bytes[:4] == b"RIFF":
+            return "image/webp"
+        return "image/jpeg"
