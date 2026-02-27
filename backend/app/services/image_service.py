@@ -46,7 +46,6 @@ class ImageProcessor:
 
                     slice_img = grid_img[y_start:y_end, x_start:x_end]
                     slice_img = self._apply_safe_inset(slice_img, inset_ratio=0.01)
-                    slice_img = self._crop_to_content(slice_img)
                     
                     # Step C: Process each slice
                     output_bytes = self._process_single_sticker(slice_img)
@@ -71,35 +70,6 @@ class ImageProcessor:
         x_end = max(width - inset_x, x_start + 1)
         y_end = max(height - inset_y, y_start + 1)
         return cv_img[y_start:y_end, x_start:x_end]
-
-    def _crop_to_content(self, cv_img: np.ndarray) -> np.ndarray:
-        """
-        Crop to non-green content inside a single cell to reduce cross-cell bleed.
-        """
-        b, g, r = cv2.split(cv_img)
-        green_mask = (g >= 200) & (r <= 60) & (b <= 60)
-        content_mask = (~green_mask).astype(np.uint8)
-        if content_mask.mean() < 0.01:
-            return cv_img
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        content_mask = cv2.morphologyEx(content_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        content_mask = cv2.morphologyEx(content_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-        ys, xs = np.where(content_mask > 0)
-        if xs.size == 0 or ys.size == 0:
-            return cv_img
-
-        x1, x2 = xs.min(), xs.max()
-        y1, y2 = ys.min(), ys.max()
-        pad = max(1, int(min(cv_img.shape[:2]) * 0.02))
-        x1 = max(0, x1 - pad)
-        y1 = max(0, y1 - pad)
-        x2 = min(cv_img.shape[1], x2 + pad)
-        y2 = min(cv_img.shape[0], y2 + pad)
-        if x2 <= x1 or y2 <= y1:
-            return cv_img
-        return cv_img[y1:y2, x1:x2]
 
     def _equal_edges(self, size: int) -> np.ndarray:
         edges = np.linspace(0, size, 5).round().astype(int)
@@ -225,11 +195,15 @@ class ImageProcessor:
         # 1. Remove background using rembg
         # Note: rembg removes the green/solid background and returns RGBA
         img_with_alpha = rembg.remove(cv_img)
+
+        # 1.1 Clean residual green spill before cropping
+        img_with_alpha = self._remove_green_spill(img_with_alpha)
         
-        # 2. Trim transparent whitespace (Crop to content)
+        # 2. Remove tiny fragments then trim transparent whitespace
         b, g, r, a = cv2.split(img_with_alpha)
+        a = self._remove_small_alpha_blobs(a)
         y_indices, x_indices = np.where(a > 0)
-        
+
         if len(x_indices) > 0 and len(y_indices) > 0:
             x_min, x_max = np.min(x_indices), np.max(x_indices)
             y_min, y_max = np.min(y_indices), np.max(y_indices)
@@ -280,3 +254,33 @@ class ImageProcessor:
             raise ValueError("Failed to encode image to PNG.")
             
         return buffer.tobytes()
+
+    def _remove_green_spill(self, rgba_img: np.ndarray) -> np.ndarray:
+        """
+        Remove leftover green spill by zeroing alpha on near-green pixels.
+        """
+        b, g, r, a = cv2.split(rgba_img)
+        green_mask = (g >= 170) & (r <= 80) & (b <= 80)
+        a = np.where(green_mask, 0, a).astype(np.uint8)
+        return cv2.merge([b, g, r, a])
+
+    def _remove_small_alpha_blobs(self, alpha: np.ndarray) -> np.ndarray:
+        """
+        Remove tiny alpha fragments that cause random debris.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        mask = (alpha > 0).astype(np.uint8) * 255
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 1:
+            return alpha
+
+        min_area = max(50, int(alpha.shape[0] * alpha.shape[1] * 0.002))
+        cleaned = np.zeros_like(alpha)
+        for label in range(1, num_labels):
+            x, y, w, h, area = stats[label]
+            if area < min_area:
+                continue
+            cleaned[labels == label] = alpha[labels == label]
+        return cleaned

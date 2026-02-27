@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     VERTEX_MODEL: str = "gemini-3-pro-image-preview"
     VERTEX_LOCATION: str = "global"
     GENERATION_CONCURRENCY: int = 1
-    GENERATION_COOLDOWN_SECONDS: int = 20
-    GENERATION_MAX_RETRIES: int = 5
-    GENERATION_RETRY_BASE_DELAY: float = 2.0
+    GENERATION_COOLDOWN_SECONDS: int = 30
+    GENERATION_MAX_RETRIES: int = 8
+    GENERATION_RETRY_BASE_DELAY: float = 5.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

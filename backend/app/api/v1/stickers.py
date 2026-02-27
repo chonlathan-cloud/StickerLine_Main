@@ -85,6 +85,15 @@ async def _process_job(
                 extra_prompt=request.prompt,
             )
 
+            # Store raw grid output for debugging / QA
+            grid_blob = f"users/{request.user_id}/jobs/{job_id}/grid.png"
+            storage_client.upload_file(
+                file_bytes=grid_bytes,
+                destination_blob_name=grid_blob,
+                content_type="image/png",
+            )
+            await _update_job(job_id, {"grid_blob": grid_blob})
+
             sticker_images = image_processor.process_sticker_grid(grid_bytes)
 
             output_urls: list[str] = []
@@ -298,12 +307,21 @@ async def get_job_status(
                 "locked": bool(slot.get("locked", False)),
             })
         result_slots = sorted(result_slots, key=lambda s: s["index"])
-        return {"status": "completed", "job_id": job_id, "result_slots": result_slots}
+        response = {"status": "completed", "job_id": job_id, "result_slots": result_slots}
+        if data.get("grid_blob"):
+            response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
+        return response
 
     if status_value == "failed":
-        return {"status": "failed", "job_id": job_id, "error": data.get("error", "Unknown error")}
+        response = {"status": "failed", "job_id": job_id, "error": data.get("error", "Unknown error")}
+        if data.get("grid_blob"):
+            response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
+        return response
 
-    return {"status": status_value or "queued", "job_id": job_id}
+    response = {"status": status_value or "queued", "job_id": job_id}
+    if data.get("grid_blob"):
+        response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
+    return response
 
 @router.get("/{job_id}/download")
 async def download_sticker_zip(
