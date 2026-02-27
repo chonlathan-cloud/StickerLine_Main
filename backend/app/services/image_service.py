@@ -29,8 +29,12 @@ class ImageProcessor:
             
             # Step B: Detect grid boundaries using green gutters (fallback to equal split)
             height, width = grid_img.shape[:2]
-            y_edges = self._detect_grid_edges(grid_img, axis="y") or self._equal_edges(height)
-            x_edges = self._detect_grid_edges(grid_img, axis="x") or self._equal_edges(width)
+            y_edges = self._detect_grid_edges(grid_img, axis="y")
+            if y_edges is None:
+                y_edges = self._equal_edges(height)
+            x_edges = self._detect_grid_edges(grid_img, axis="x")
+            if x_edges is None:
+                x_edges = self._equal_edges(width)
 
             for row in range(4):
                 for col in range(4):
@@ -41,12 +45,13 @@ class ImageProcessor:
                     x_end = x_edges[col + 1]
 
                     slice_img = grid_img[y_start:y_end, x_start:x_end]
-                    slice_img = self._apply_safe_inset(slice_img, inset_ratio=0.03)
+                    slice_img = self._apply_safe_inset(slice_img, inset_ratio=0.01)
+                    slice_img = self._crop_to_content(slice_img)
                     
                     # Step C: Process each slice
                     output_bytes = self._process_single_sticker(slice_img)
                     processed_stickers.append(output_bytes)
-                    
+
             return processed_stickers
         except Exception as e:
             logger.error(f"Error processing sticker grid: {e}")
@@ -66,6 +71,35 @@ class ImageProcessor:
         x_end = max(width - inset_x, x_start + 1)
         y_end = max(height - inset_y, y_start + 1)
         return cv_img[y_start:y_end, x_start:x_end]
+
+    def _crop_to_content(self, cv_img: np.ndarray) -> np.ndarray:
+        """
+        Crop to non-green content inside a single cell to reduce cross-cell bleed.
+        """
+        b, g, r = cv2.split(cv_img)
+        green_mask = (g >= 200) & (r <= 60) & (b <= 60)
+        content_mask = (~green_mask).astype(np.uint8)
+        if content_mask.mean() < 0.01:
+            return cv_img
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        content_mask = cv2.morphologyEx(content_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        content_mask = cv2.morphologyEx(content_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        ys, xs = np.where(content_mask > 0)
+        if xs.size == 0 or ys.size == 0:
+            return cv_img
+
+        x1, x2 = xs.min(), xs.max()
+        y1, y2 = ys.min(), ys.max()
+        pad = max(1, int(min(cv_img.shape[:2]) * 0.02))
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(cv_img.shape[1], x2 + pad)
+        y2 = min(cv_img.shape[0], y2 + pad)
+        if x2 <= x1 or y2 <= y1:
+            return cv_img
+        return cv_img[y1:y2, x1:x2]
 
     def _equal_edges(self, size: int) -> np.ndarray:
         edges = np.linspace(0, size, 5).round().astype(int)

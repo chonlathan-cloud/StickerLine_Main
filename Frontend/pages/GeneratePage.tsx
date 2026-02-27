@@ -191,7 +191,7 @@ const GeneratePage: React.FC = () => {
     setJobId(null);
 
     const pollUntilComplete = async (jobId: string) => {
-      const maxAttempts = 60;
+      const maxAttempts = 180;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const statusResp = await checkJobStatus(jobId);
         if (statusResp.status === 'completed' && statusResp.result_slots) {
@@ -202,7 +202,7 @@ const GeneratePage: React.FC = () => {
         }
         await new Promise((resolve) => window.setTimeout(resolve, 2000));
       }
-      throw new Error('Generation is taking longer than expected. Please try again.');
+      throw new Error('กำลังสร้างภาพใช้เวลานานกว่าปกติ โปรดลองอีกครั้งในภายหลัง');
     };
 
     try {
