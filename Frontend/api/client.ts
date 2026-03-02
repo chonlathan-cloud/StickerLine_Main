@@ -6,6 +6,23 @@ const API = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
+const getLineAccessToken = () => {
+  try {
+    return localStorage.getItem('line_access_token') || '';
+  } catch {
+    return '';
+  }
+};
+
+API.interceptors.request.use((config) => {
+  const token = getLineAccessToken();
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
 //const API = axios.create({
 //  baseURL: (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080',
 //  headers: { 'Content-Type': 'application/json' },

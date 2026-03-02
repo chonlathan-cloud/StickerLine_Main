@@ -2,6 +2,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from app.services.payment_service import PaymentService
+from app.api.deps import get_line_profile, assert_user_match
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,8 +21,10 @@ class PaymentCreateRequest(BaseModel):
 async def create_payment(
     request: PaymentCreateRequest,
     payment_service: PaymentService = Depends(get_payment_service),
+    token_profile: dict = Depends(get_line_profile),
 ) -> dict:
     try:
+        assert_user_match(token_profile["line_id"], request.user_id)
         result = await payment_service.create_promptpay_charge(
             user_id=request.user_id,
             package_id=request.package_id,
@@ -38,9 +41,13 @@ async def create_payment(
 async def get_payment_status(
     charge_id: str = Query(..., min_length=3),
     payment_service: PaymentService = Depends(get_payment_service),
+    token_profile: dict = Depends(get_line_profile),
 ) -> dict:
     try:
         result = await payment_service.get_payment_status(charge_id)
+        if result.get("user_id"):
+            assert_user_match(token_profile["line_id"], result["user_id"])
+        result.pop("user_id", None)
         return result
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from app.models.sticker import StickerGenerateRequest
+from app.api.deps import get_line_profile, assert_user_match
 from app.services.user_service import UserService
 from app.services.ai_service import AIService
 from app.services.image_service import ImageProcessor
@@ -158,12 +159,14 @@ async def generate_stickers(
     user_service: UserService = Depends(get_user_service),
     ai_service: AIService = Depends(get_ai_service),
     image_processor: ImageProcessor = Depends(get_image_processor),
-    storage_client: StorageClient = Depends(get_storage_client)
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
 ):
     """
     Main orchestration endpoint for generating Stickers.
     """
     user_id = request.user_id
+    assert_user_match(token_profile["line_id"], user_id)
     
     # 1. Deduct 1 Coin from User atomically
     try:
@@ -202,10 +205,12 @@ async def get_current_stickers(
     user_id: str = Query(..., min_length=3),
     user_service: UserService = Depends(get_user_service),
     storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
 ):
     """
     Return the latest sticker set for the user with fresh signed URLs.
     """
+    assert_user_match(token_profile["line_id"], user_id)
     slots, job_id = await user_service.get_current_stickers(user_id)
     if not slots:
         return {"status": "empty"}
@@ -235,10 +240,12 @@ async def get_current_stickers(
 async def reset_current_stickers(
     request: ResetStickerSetRequest,
     user_service: UserService = Depends(get_user_service),
+    token_profile: dict = Depends(get_line_profile),
 ):
     """
     Clear current sticker set when user starts a new selfie.
     """
+    assert_user_match(token_profile["line_id"], request.user_id)
     await user_service.reset_current_stickers(request.user_id)
     return {"status": "ok"}
 
@@ -247,10 +254,12 @@ async def download_current_sticker_zip(
     user_id: str = Query(..., min_length=3),
     user_service: UserService = Depends(get_user_service),
     storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
 ):
     """
     Download the latest merged sticker set for a user as a ZIP file.
     """
+    assert_user_match(token_profile["line_id"], user_id)
     slots, _ = await user_service.get_current_stickers(user_id)
     if not slots:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No stickers found for this user.")
@@ -283,6 +292,7 @@ async def download_current_sticker_zip(
 async def get_job_status(
     job_id: str,
     storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
 ):
     job_ref = _get_jobs_collection().document(job_id)
     snapshot = await job_ref.get()
@@ -290,6 +300,9 @@ async def get_job_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
 
     data = snapshot.to_dict() or {}
+    job_user_id = data.get("user_id")
+    if job_user_id:
+        assert_user_match(token_profile["line_id"], job_user_id)
     status_value = data.get("status")
 
     if status_value == "completed":
@@ -328,10 +341,12 @@ async def download_sticker_zip(
     job_id: str,
     user_id: str = Query(..., min_length=3),
     storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
 ):
     """
     Download all 16 stickers for a job as a ZIP file.
     """
+    assert_user_match(token_profile["line_id"], user_id)
     prefix = f"users/{user_id}/jobs/{job_id}/"
     blobs = storage_client.list_blobs(prefix=prefix)
     if not blobs:

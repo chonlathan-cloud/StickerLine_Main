@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 from app.utils.storage import StorageClient
 from app.core.config import settings
+from app.api.deps import get_line_profile
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,7 +43,8 @@ def _decode_base64_image(data: str) -> bytes:
 @router.post("/upload")
 async def upload_image(
     request: UploadRequest,
-    storage_client: StorageClient = Depends(get_storage_client)
+    storage_client: StorageClient = Depends(get_storage_client),
+    _: dict = Depends(get_line_profile),
 ):
     """
     Accept a Base64-encoded image, upload it to GCS,

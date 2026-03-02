@@ -1,5 +1,8 @@
 import logging
 import datetime
+import google.auth
+from google.auth.transport.requests import Request
+from google.auth.iam import Signer
 from google.cloud import storage
 from app.core.config import settings
 
@@ -12,6 +15,9 @@ class StorageClient:
             self.client = storage.Client(project=settings.PROJECT_ID)
             self.bucket_name = settings.GCS_BUCKET_NAME
             self.bucket = self.client.bucket(self.bucket_name)
+            self._signer = None
+            self._service_account_email = None
+            self._access_token = None
             logger.info("Storage Client initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize Storage Client: {e}")
@@ -27,11 +33,7 @@ class StorageClient:
             blob.upload_from_string(file_bytes, content_type=content_type)
             
             # Generate a signed URL valid for 1 hour for secure frontend access
-            url = blob.generate_signed_url(
-                version="v4",
-                expiration=datetime.timedelta(hours=1),
-                method="GET"
-            )
+            url = self._generate_signed_url(blob, expires_hours=1)
             
             logger.info(f"File uploaded to {destination_blob_name}")
             return url
@@ -50,10 +52,45 @@ class StorageClient:
         Generate a signed URL for an existing blob.
         """
         blob = self.bucket.blob(blob_name)
+        return self._generate_signed_url(blob, expires_hours=expires_hours)
+
+    def _refresh_signer(self) -> None:
+        """
+        Refresh credentials and create IAM signer if needed (for Cloud Run).
+        """
+        credentials, _ = google.auth.default()
+        request = Request()
+        credentials.refresh(request)
+
+        service_account_email = getattr(credentials, "service_account_email", None)
+        if not service_account_email:
+            self._signer = None
+            self._service_account_email = None
+            self._access_token = None
+            return
+
+        self._signer = Signer(request, credentials, service_account_email)
+        self._service_account_email = service_account_email
+        self._access_token = credentials.token
+
+    def _generate_signed_url(self, blob: storage.Blob, expires_hours: int = 1) -> str:
+        """
+        Generate signed URL using IAM Signer if available; fall back to default signer.
+        """
+        self._refresh_signer()
+        if self._signer and self._service_account_email and self._access_token:
+            return blob.generate_signed_url(
+                version="v4",
+                expiration=datetime.timedelta(hours=expires_hours),
+                method="GET",
+                service_account_email=self._service_account_email,
+                access_token=self._access_token,
+            )
+
         return blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(hours=expires_hours),
-            method="GET"
+            method="GET",
         )
 
     def download_gcs_uri(self, gcs_uri: str) -> bytes:

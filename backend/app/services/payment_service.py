@@ -183,6 +183,7 @@ class PaymentService:
         data = snapshot.to_dict() or {}
         return {
             "charge_id": charge_id,
+            "user_id": data.get("user_id"),
             "status": data.get("status", "pending"),
             "coins": data.get("coins", 0),
             "amount_satang": data.get("amount_satang", 0),

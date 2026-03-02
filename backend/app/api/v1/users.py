@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.services.user_service import UserService
+from app.api.deps import get_line_profile, assert_user_match
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -11,13 +12,15 @@ def get_user_service():
 @router.get("/{user_id}/permissions")
 async def get_user_permissions(
     user_id: str,
-    user_service: UserService = Depends(get_user_service)
+    user_service: UserService = Depends(get_user_service),
+    token_profile: dict = Depends(get_line_profile),
 ):
     """
     Check if a user has sufficient spending to download all their standard stickers.
     Business Logic: total_spent_thb >= 30.
     """
     try:
+        assert_user_match(token_profile["line_id"], user_id)
         user_ref = user_service.users_collection.document(user_id)
         user_doc = await user_ref.get()
 

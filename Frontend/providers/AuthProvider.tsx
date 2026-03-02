@@ -48,6 +48,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (cancelled) return;
 
         if (liff.isLoggedIn()) {
+          const accessToken = liff.getAccessToken();
+          if (accessToken) {
+            localStorage.setItem('line_access_token', accessToken);
+          }
           const liffProfile = await liff.getProfile();
           if (cancelled) return;
 
@@ -99,6 +103,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (typeof liff !== 'undefined' && liff.isLoggedIn()) {
       liff.logout();
     }
+    localStorage.removeItem('line_access_token');
     setProfile(null);
     setCoinBalance(null);
   };

@@ -7,6 +7,9 @@ REPO="${REPO:-asia-southeast1-docker.pkg.dev/${PROJECT_ID}/stickerline}"
 
 BE_SERVICE="${BE_SERVICE:-stickerline-be}"
 RUN_SERVICE_ACCOUNT="${RUN_SERVICE_ACCOUNT:-superadmin@${PROJECT_ID}.iam.gserviceaccount.com}"
+NO_CACHE="${NO_CACHE:-0}"
+MEMORY="${MEMORY:-1Gi}"
+ALLOW_UNAUTH="${ALLOW_UNAUTH:-0}"
 
 GCS_BUCKET_NAME="${GCS_BUCKET_NAME:-}"
 LIFF_CHANNEL_ID="${LIFF_CHANNEL_ID:-}"
@@ -31,11 +34,23 @@ BE_IMAGE="${REPO}/${BE_SERVICE}:${GIT_SHA}"
 echo "==> Configure Docker for Artifact Registry"
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-echo "==> Build Backend image"
-docker build -t "${BE_IMAGE}" backend
+BUILD_FLAGS=()
+if [[ "${NO_CACHE}" == "1" ]]; then
+  BUILD_FLAGS+=(--no-cache)
+fi
 
-echo "==> Push Backend image"
-docker push "${BE_IMAGE}"
+echo "==> Build & Push Backend image (linux/amd64)"
+docker buildx build \
+  --platform linux/amd64 \
+  -t "${BE_IMAGE}" \
+  "${BUILD_FLAGS[@]}" \
+  --push \
+  backend
+
+ALLOW_FLAG="--no-allow-unauthenticated"
+if [[ "${ALLOW_UNAUTH}" == "1" ]]; then
+  ALLOW_FLAG="--allow-unauthenticated"
+fi
 
 echo "==> Deploy Backend (private)"
 gcloud run deploy "${BE_SERVICE}" \
@@ -43,7 +58,8 @@ gcloud run deploy "${BE_SERVICE}" \
   --region "${REGION}" \
   --image "${BE_IMAGE}" \
   --service-account "${RUN_SERVICE_ACCOUNT}" \
-  --no-allow-unauthenticated \
+  "${ALLOW_FLAG}" \
+  --memory "${MEMORY}" \
   --set-env-vars "PROJECT_ID=${PROJECT_ID},GCS_BUCKET_NAME=${GCS_BUCKET_NAME},LIFF_CHANNEL_ID=${LIFF_CHANNEL_ID},VERTEX_MODEL=${VERTEX_MODEL},VERTEX_LOCATION=${VERTEX_LOCATION},GENAI_PROVIDER=${GENAI_PROVIDER},GENAI_FALLBACK_PROVIDER=${GENAI_FALLBACK_PROVIDER},GENAI_FALLBACK_MAX_RETRIES=${GENAI_FALLBACK_MAX_RETRIES},GENERATION_MAX_RETRIES=${GENERATION_MAX_RETRIES},GENERATION_RETRY_BASE_DELAY=${GENERATION_RETRY_BASE_DELAY},GENERATION_CONCURRENCY=${GENERATION_CONCURRENCY},GENERATION_COOLDOWN_SECONDS=${GENERATION_COOLDOWN_SECONDS}" \
   --set-secrets "GEMINI_API_KEY=gemini_api_key:latest,LINE_CHANNEL_SECRET=line_channel_secret:latest,OMISE_SECRET_KEY=omise_secret_key:latest,OMISE_PUBLIC_KEY=omise_public_key:latest"
 
