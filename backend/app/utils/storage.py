@@ -29,6 +29,7 @@ class StorageClient:
         destination_blob_name: str,
         content_type: str = "image/png",
         response_disposition: str | None = None,
+        response_type: str | None = None,
     ) -> str:
         """
         Upload data to GCS bucket defined in config.py.
@@ -43,6 +44,7 @@ class StorageClient:
                 blob,
                 expires_hours=1,
                 response_disposition=response_disposition,
+                response_type=response_type,
             )
             
             logger.info(f"File uploaded to {destination_blob_name}")
@@ -62,6 +64,7 @@ class StorageClient:
         blob_name: str,
         expires_hours: int = 1,
         response_disposition: str | None = None,
+        response_type: str | None = None,
     ) -> str:
         """
         Generate a signed URL for an existing blob.
@@ -71,6 +74,7 @@ class StorageClient:
             blob,
             expires_hours=expires_hours,
             response_disposition=response_disposition,
+            response_type=response_type,
         )
 
     def _refresh_signer(self) -> None:
@@ -97,6 +101,7 @@ class StorageClient:
         blob: storage.Blob,
         expires_hours: int = 1,
         response_disposition: str | None = None,
+        response_type: str | None = None,
     ) -> str:
         """
         Generate signed URL using IAM Signer if available; fall back to default signer.
@@ -110,6 +115,7 @@ class StorageClient:
                 service_account_email=self._service_account_email,
                 access_token=self._access_token,
                 response_disposition=response_disposition,
+                response_type=response_type,
             )
 
         return blob.generate_signed_url(
@@ -117,6 +123,7 @@ class StorageClient:
             expiration=datetime.timedelta(hours=expires_hours),
             method="GET",
             response_disposition=response_disposition,
+            response_type=response_type,
         )
 
     def download_gcs_uri(self, gcs_uri: str) -> bytes:

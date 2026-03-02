@@ -336,6 +336,7 @@ async def get_current_sticker_download_url(
         destination_blob_name=blob_name,
         content_type="application/zip",
         response_disposition=f"attachment; filename={filename}",
+        response_type="application/zip",
     )
 
     return {"url": url}

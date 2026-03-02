@@ -279,6 +279,27 @@ const GeneratePage: React.FC = () => {
     return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
   };
 
+  const openDownloadUrl = (url: string) => {
+    const liffSdk = (window as any).liff;
+    if (liffSdk?.isInClient?.()) {
+      liffSdk.openWindow({ url, external: true });
+      return;
+    }
+
+    if (isIOSDevice()) {
+      window.location.href = url;
+      return;
+    }
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.rel = 'noopener';
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleDownload = async () => {
     if (!profile?.userId || stickerSlots.length !== TOTAL_STICKERS) {
       setError('Download is not ready yet. Please generate stickers first.');
@@ -292,19 +313,7 @@ const GeneratePage: React.FC = () => {
         throw new Error('Download URL is unavailable.');
       }
 
-      if (isIOSDevice()) {
-        const opened = window.open(url, '_blank');
-        if (!opened) {
-          window.location.href = url;
-        }
-      } else {
-        const link = document.createElement('a');
-        link.href = url;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      }
+      openDownloadUrl(url);
     } catch (err: any) {
       const message = err?.response?.data?.detail || err?.message || 'Failed to download stickers.';
       setError(message);
@@ -602,7 +611,7 @@ const GeneratePage: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4 sm:gap-3">
+                <div className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 sm:gap-3">
                   {stickerSlots.map((slot, index) => (
                     <button
                       type="button"
@@ -611,7 +620,7 @@ const GeneratePage: React.FC = () => {
                       disabled={loading}
                       aria-pressed={slot.locked}
                       aria-label={`Select sticker ${index + 1}`}
-                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-1 ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'
+                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-[3px] ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'
                         }`}
                     >
                       <img
@@ -621,7 +630,7 @@ const GeneratePage: React.FC = () => {
                       />
                       {slot.locked && (
                         <>
-                          <span className="pointer-events-none absolute inset-1 rounded-xl bg-emerald-400/20" aria-hidden="true" />
+                          <span className="pointer-events-none absolute inset-[3px] rounded-xl bg-emerald-400/20" aria-hidden="true" />
                           <span
                             className="pointer-events-none absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/90 text-xs font-bold text-white shadow"
                             aria-hidden="true"
