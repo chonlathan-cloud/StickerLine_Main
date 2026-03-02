@@ -89,6 +89,17 @@ class UserService:
         """
         await self.set_current_stickers(user_id, [], None)
 
+    async def get_display_name(self, user_id: str) -> str | None:
+        user_ref = self.users_collection.document(user_id)
+        snapshot = await user_ref.get()
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict() or {}
+        display_name = data.get("display_name")
+        if isinstance(display_name, str) and display_name.strip():
+            return display_name.strip()
+        return None
+
     async def deduct_coin(self, user_id: str, amount: int = 1) -> int:
         """
         Deduct coin from user using atomic transaction to prevent race conditions.

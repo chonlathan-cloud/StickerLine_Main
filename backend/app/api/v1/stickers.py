@@ -42,6 +42,11 @@ class ResetStickerSetRequest(BaseModel):
 def _sanitize_locked_indices(indices: list[int]) -> set[int]:
     return {idx for idx in indices if isinstance(idx, int) and 0 <= idx < 16}
 
+def _sanitize_filename(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)
+    cleaned = cleaned.strip("_")
+    return cleaned or "stickers"
+
 def _utc_now():
     return datetime.now(timezone.utc)
 
@@ -287,6 +292,53 @@ async def download_current_sticker_zip(
         "Content-Disposition": "attachment; filename=stickers.zip"
     }
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+@router.get("/current/download-url")
+async def get_current_sticker_download_url(
+    user_id: str = Query(..., min_length=3),
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    """
+    Generate a ZIP in GCS and return a signed URL for direct download (mobile-friendly).
+    """
+    assert_user_match(token_profile["line_id"], user_id)
+    slots, _ = await user_service.get_current_stickers(user_id)
+    if not slots:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No stickers found for this user.")
+
+    def extract_index(slot: dict) -> int:
+        try:
+            return int(slot.get("index", 9999))
+        except Exception:
+            return 9999
+
+    slots_sorted = sorted([s for s in slots if isinstance(s, dict)], key=extract_index)
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for slot in slots_sorted:
+            blob_name = slot.get("blob_name")
+            if not blob_name:
+                continue
+            filename = f"{extract_index(slot)}.png"
+            blob = storage_client.bucket.blob(blob_name)
+            archive.writestr(filename, blob.download_as_bytes())
+
+    buffer.seek(0)
+    display_name = await user_service.get_display_name(user_id) or user_id
+    filename = f"stickers_{_sanitize_filename(display_name)}.zip"
+    blob_name = f"users/{user_id}/downloads/{uuid.uuid4()}.zip"
+
+    url = storage_client.upload_file(
+        file_bytes=buffer.getvalue(),
+        destination_blob_name=blob_name,
+        content_type="application/zip",
+        response_disposition=f"attachment; filename={filename}",
+    )
+
+    return {"url": url}
 
 @router.get("/{job_id}")
 async def get_job_status(

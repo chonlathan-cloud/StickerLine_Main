@@ -23,7 +23,13 @@ class StorageClient:
             logger.error(f"Failed to initialize Storage Client: {e}")
             raise e
 
-    def upload_file(self, file_bytes: bytes, destination_blob_name: str, content_type: str = "image/png") -> str:
+    def upload_file(
+        self,
+        file_bytes: bytes,
+        destination_blob_name: str,
+        content_type: str = "image/png",
+        response_disposition: str | None = None,
+    ) -> str:
         """
         Upload data to GCS bucket defined in config.py.
         Returns the signed URL valid for 1 hour.
@@ -33,7 +39,11 @@ class StorageClient:
             blob.upload_from_string(file_bytes, content_type=content_type)
             
             # Generate a signed URL valid for 1 hour for secure frontend access
-            url = self._generate_signed_url(blob, expires_hours=1)
+            url = self._generate_signed_url(
+                blob,
+                expires_hours=1,
+                response_disposition=response_disposition,
+            )
             
             logger.info(f"File uploaded to {destination_blob_name}")
             return url
@@ -47,12 +57,21 @@ class StorageClient:
         """
         return list(self.bucket.list_blobs(prefix=prefix))
 
-    def generate_signed_url(self, blob_name: str, expires_hours: int = 1) -> str:
+    def generate_signed_url(
+        self,
+        blob_name: str,
+        expires_hours: int = 1,
+        response_disposition: str | None = None,
+    ) -> str:
         """
         Generate a signed URL for an existing blob.
         """
         blob = self.bucket.blob(blob_name)
-        return self._generate_signed_url(blob, expires_hours=expires_hours)
+        return self._generate_signed_url(
+            blob,
+            expires_hours=expires_hours,
+            response_disposition=response_disposition,
+        )
 
     def _refresh_signer(self) -> None:
         """
@@ -73,7 +92,12 @@ class StorageClient:
         self._service_account_email = service_account_email
         self._access_token = credentials.token
 
-    def _generate_signed_url(self, blob: storage.Blob, expires_hours: int = 1) -> str:
+    def _generate_signed_url(
+        self,
+        blob: storage.Blob,
+        expires_hours: int = 1,
+        response_disposition: str | None = None,
+    ) -> str:
         """
         Generate signed URL using IAM Signer if available; fall back to default signer.
         """
@@ -85,12 +109,14 @@ class StorageClient:
                 method="GET",
                 service_account_email=self._service_account_email,
                 access_token=self._access_token,
+                response_disposition=response_disposition,
             )
 
         return blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(hours=expires_hours),
             method="GET",
+            response_disposition=response_disposition,
         )
 
     def download_gcs_uri(self, gcs_uri: str) -> bytes:

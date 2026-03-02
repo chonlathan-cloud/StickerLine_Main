@@ -128,3 +128,10 @@ export async function downloadCurrentStickersZip(userId: string) {
   );
   return data;
 }
+
+export async function getCurrentStickersDownloadUrl(userId: string) {
+  const { data } = await API.get<{ url: string }>(
+    `/api/v1/jobs/current/download-url?user_id=${encodeURIComponent(userId)}`,
+  );
+  return data;
+}

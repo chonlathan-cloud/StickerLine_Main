@@ -21,6 +21,18 @@ COPY requirements.txt .
 # Install Python dependencies without cache to keep image small
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Preload rembg model to avoid cold start downloads
+RUN python - <<'PY'
+import os
+import urllib.request
+
+url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
+path = "/root/.u2net/u2net.onnx"
+os.makedirs("/root/.u2net", exist_ok=True)
+if not os.path.exists(path):
+    urllib.request.urlretrieve(url, path)
+PY
+
 # Copy the application code
 COPY ./app /app/app
 

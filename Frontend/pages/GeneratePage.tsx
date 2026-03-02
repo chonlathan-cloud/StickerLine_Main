@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { StickerStyle, StickerSheetConfig } from '../types';
-import { downloadCurrentStickersZip, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
+import { getCurrentStickersDownloadUrl, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
 import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
@@ -274,6 +274,11 @@ const GeneratePage: React.FC = () => {
     return cleaned || 'stickers';
   };
 
+  const isIOSDevice = () => {
+    const ua = navigator.userAgent || '';
+    return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
+  };
+
   const handleDownload = async () => {
     if (!profile?.userId || stickerSlots.length !== TOTAL_STICKERS) {
       setError('Download is not ready yet. Please generate stickers first.');
@@ -282,16 +287,24 @@ const GeneratePage: React.FC = () => {
 
     try {
       setIsDownloading(true);
-      const blob = await downloadCurrentStickersZip(profile.userId);
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      const displayName = profile?.displayName || 'stickers';
-      link.href = url;
-      link.download = `stickers_${sanitizeFileName(displayName)}.zip`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
+      const { url } = await getCurrentStickersDownloadUrl(profile.userId);
+      if (!url) {
+        throw new Error('Download URL is unavailable.');
+      }
+
+      if (isIOSDevice()) {
+        const opened = window.open(url, '_blank');
+        if (!opened) {
+          window.location.href = url;
+        }
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
     } catch (err: any) {
       const message = err?.response?.data?.detail || err?.message || 'Failed to download stickers.';
       setError(message);
@@ -589,7 +602,7 @@ const GeneratePage: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="mt-3 grid grid-cols-4 gap-3">
+                <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4 sm:gap-3">
                   {stickerSlots.map((slot, index) => (
                     <button
                       type="button"
@@ -598,7 +611,7 @@ const GeneratePage: React.FC = () => {
                       disabled={loading}
                       aria-pressed={slot.locked}
                       aria-label={`Select sticker ${index + 1}`}
-                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-1.5 ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'
+                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-1 ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'
                         }`}
                     >
                       <img
@@ -608,7 +621,7 @@ const GeneratePage: React.FC = () => {
                       />
                       {slot.locked && (
                         <>
-                          <span className="pointer-events-none absolute inset-1.5 rounded-xl bg-emerald-400/20" aria-hidden="true" />
+                          <span className="pointer-events-none absolute inset-1 rounded-xl bg-emerald-400/20" aria-hidden="true" />
                           <span
                             className="pointer-events-none absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/90 text-xs font-bold text-white shadow"
                             aria-hidden="true"
