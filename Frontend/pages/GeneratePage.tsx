@@ -8,15 +8,16 @@ import { useAuth } from '../providers/AuthProvider';
 
 type ProcessingStep = 'idle' | 'analyzing' | 'generating' | 'removing' | 'complete';
 
-const STICKER_COLUMNS = 4;
-const STICKER_ROWS = 4;
-const TOTAL_STICKERS = STICKER_COLUMNS * STICKER_ROWS;
+const DEFAULT_STICKER_COUNT = 16;
+const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
 
 interface StickerSlot {
   id: string;
   url: string;
   locked: boolean;
 }
+
+const isSupportedStickerCount = (count: number) => ALLOWED_STICKER_COUNTS.has(count);
 
 const STYLE_OPTIONS: Array<{
   value: StickerStyle;
@@ -51,11 +52,12 @@ const GeneratePage: React.FC = () => {
   const isOnline = useOnlineStatus();
   const { profile, coinBalance } = useAuth();
   const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
-  const [generationTargetCount, setGenerationTargetCount] = useState(TOTAL_STICKERS);
+  const [generationTargetCount, setGenerationTargetCount] = useState(DEFAULT_STICKER_COUNT);
   const [isComplianceChecking, setIsComplianceChecking] = useState(false);
   const [isPromptExpanded, setIsPromptExpanded] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isSharingToPhotos, setIsSharingToPhotos] = useState(false);
 
   const [config, setConfig] = useState<StickerSheetConfig>({
     base64Image: '',
@@ -106,7 +108,8 @@ const GeneratePage: React.FC = () => {
       if (!profile?.userId) return;
       try {
         const data = await getCurrentStickers(profile.userId);
-        if (data.status === 'ok' && data.result_slots && data.result_slots.length === TOTAL_STICKERS) {
+        const slotCount = data.result_slots?.length ?? 0;
+        if (data.status === 'ok' && data.result_slots && isSupportedStickerCount(slotCount)) {
           const now = Date.now();
           const slots = data.result_slots.map((slot, index) => ({
             id: `${data.job_id ?? now}-${index}`,
@@ -117,6 +120,7 @@ const GeneratePage: React.FC = () => {
           setTransparentImageUrl(slots[0]?.url ?? null);
           setHasGenerated(true);
           setJobId(data.job_id ?? null);
+          setGenerationTargetCount(slotCount);
         }
       } catch {
         // Non-blocking: ignore load failures for current set
@@ -143,7 +147,7 @@ const GeneratePage: React.FC = () => {
         setTransparentImageUrl(null);
         setStickerSlots([]);
         setJobId(null);
-        setGenerationTargetCount(TOTAL_STICKERS);
+        setGenerationTargetCount(DEFAULT_STICKER_COUNT);
         setError(null);
         if (profile?.userId) {
           resetCurrentStickers(profile.userId).catch(() => null);
@@ -174,16 +178,17 @@ const GeneratePage: React.FC = () => {
       return;
     }
 
-    const canReuseExisting = stickerSlots.length === TOTAL_STICKERS;
+    const canReuseExisting = isSupportedStickerCount(stickerSlots.length);
     const unlockedCount = canReuseExisting
       ? stickerSlots.filter((slot) => !slot.locked).length
-      : TOTAL_STICKERS;
+      : DEFAULT_STICKER_COUNT;
 
     if (canReuseExisting && unlockedCount === 0) {
       setError('เลือกอย่างน้อย 1 สติ๊กเกอร์ที่ยังไม่ล็อกก่อนกด Regenerate');
       return;
     }
 
+    let finalStickerCount = canReuseExisting ? stickerSlots.length : DEFAULT_STICKER_COUNT;
     setGenerationTargetCount(unlockedCount);
     setLoading(true);
     setProcessingStep('analyzing');
@@ -224,9 +229,10 @@ const GeneratePage: React.FC = () => {
         resolved = await pollUntilComplete(jobResp.job_id);
       }
 
-      if (resolved.status === 'completed' && resolved.result_slots && resolved.result_slots.length >= TOTAL_STICKERS) {
+      const resultCount = resolved.result_slots?.length ?? 0;
+      if (resolved.status === 'completed' && resolved.result_slots && isSupportedStickerCount(resultCount)) {
         const now = Date.now();
-        const slots = resolved.result_slots.slice(0, TOTAL_STICKERS).map((slot, index) => ({
+        const slots = resolved.result_slots.map((slot, index) => ({
           id: `${resolved.job_id ?? now}-${index}`,
           url: slot.url,
           locked: slot.locked,
@@ -236,6 +242,8 @@ const GeneratePage: React.FC = () => {
         setJobId(resolved.job_id || null);
         setTransparentImageUrl(slots[0]?.url ?? null);
         setHasGenerated(true);
+        finalStickerCount = resultCount;
+        setGenerationTargetCount(resultCount);
         setProcessingStep('complete');
 
         setTimeout(() => {
@@ -254,7 +262,7 @@ const GeneratePage: React.FC = () => {
     } finally {
       setLoading(false);
       setProcessingStep('idle');
-      setGenerationTargetCount(TOTAL_STICKERS);
+      setGenerationTargetCount(finalStickerCount);
     }
   };
 
@@ -279,6 +287,13 @@ const GeneratePage: React.FC = () => {
     return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
   };
 
+  const isMobileDevice = () => {
+    const ua = navigator.userAgent || '';
+    return /Android|webOS|iPhone|iPad|iPod/i.test(ua) || (navigator.maxTouchPoints ?? 0) > 1;
+  };
+
+  const supportsFileShare = () => typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
   const openDownloadUrl = (url: string) => {
     const liffSdk = (window as any).liff;
     if (liffSdk?.isInClient?.()) {
@@ -301,7 +316,7 @@ const GeneratePage: React.FC = () => {
   };
 
   const handleDownload = async () => {
-    if (!profile?.userId || stickerSlots.length !== TOTAL_STICKERS) {
+    if (!profile?.userId || !isSupportedStickerCount(stickerSlots.length)) {
       setError('Download is not ready yet. Please generate stickers first.');
       return;
     }
@@ -322,8 +337,64 @@ const GeneratePage: React.FC = () => {
     }
   };
 
+  const handleSaveToPhotos = async () => {
+    if (!isSupportedStickerCount(stickerSlots.length)) {
+      setError('Save to Photos is not ready yet. Please generate stickers first.');
+      return;
+    }
+
+    if (!supportsFileShare()) {
+      setError('อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน');
+      return;
+    }
+
+    try {
+      setIsSharingToPhotos(true);
+      setError(null);
+
+      const files = await Promise.all(
+        stickerSlots.map(async (slot, index) => {
+          const response = await fetch(slot.url);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch sticker ${index + 1}`);
+          }
+
+          const blob = await response.blob();
+          return new File(
+            [blob],
+            `sticker-${String(index + 1).padStart(2, '0')}.png`,
+            { type: blob.type || 'image/png' },
+          );
+        })
+      );
+
+      if (typeof navigator.canShare === 'function' && !navigator.canShare({ files })) {
+        setError('อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน');
+        return;
+      }
+
+      await navigator.share({
+        title: 'LINE Sticker PNG Set',
+        files,
+      });
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return;
+      }
+
+      const message = err?.message || 'Save to Photos failed.';
+      setError(message.includes('Failed to fetch')
+        ? 'ไม่สามารถเตรียมไฟล์ PNG สำหรับ Save to Photos ได้ กรุณาลอง Download ZIP แทน'
+        : message);
+    } finally {
+      setIsSharingToPhotos(false);
+    }
+  };
+
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
-  const unlockedCount = stickerSlots.length > 0 ? stickerSlots.length - lockedCount : TOTAL_STICKERS;
+  const currentStickerCount = stickerSlots.length;
+  const isMobile = isMobileDevice();
+  const unlockedCount = currentStickerCount > 0 ? currentStickerCount - lockedCount : DEFAULT_STICKER_COUNT;
   const generateButtonLabel = loading
     ? 'Generating...'
     : hasGenerated
@@ -333,7 +404,7 @@ const GeneratePage: React.FC = () => {
       : 'Generate';
   const generateHelperText = loading
     ? '🔄 Generating'
-    : hasGenerated && lockedCount === TOTAL_STICKERS
+    : hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount
       ? '🔒 Locked'
       : hasGenerated
         ? '✅ Ready'
@@ -566,7 +637,7 @@ const GeneratePage: React.FC = () => {
                 loading
                 || !config.base64Image
                 || !isOnline
-                || (hasGenerated && stickerSlots.length === TOTAL_STICKERS && lockedCount === TOTAL_STICKERS)
+                || (hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount)
               }
               aria-describedby={generateHelperText ? 'generate-helper' : undefined}
               className="focus-ring min-h-11 w-full rounded-2xl bg-indigo-600 px-4 py-3 text-base font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-400"
@@ -602,12 +673,12 @@ const GeneratePage: React.FC = () => {
               <span className="rounded-full bg-green-100 px-3 py-1 text-sm font-medium text-green-800">PNG ready</span>
             </div>
 
-            {stickerSlots.length === TOTAL_STICKERS ? (
+            {isSupportedStickerCount(currentStickerCount) ? (
               <>
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm text-slate-700">ติ๊กถูกที่สติ๊กเกอร์ที่ต้องการเก็บไว้ก่อนกด Regenerate</p>
                   <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700">
-                    Locked {lockedCount}/{TOTAL_STICKERS}
+                    Locked {lockedCount}/{currentStickerCount}
                   </span>
                 </div>
 
@@ -653,14 +724,37 @@ const GeneratePage: React.FC = () => {
               </div>
             )}
 
-            <button
-              type="button"
-              onClick={handleDownload}
-              disabled={isDownloading || stickerSlots.length !== TOTAL_STICKERS}
-              className="focus-ring mt-4 min-h-11 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-900 hover:border-indigo-500 hover:text-indigo-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-            >
-              {isDownloading ? 'Preparing ZIP...' : 'Download ZIP'}
-            </button>
+            <div className="mt-4 space-y-2">
+              {isMobile ? (
+                <button
+                  type="button"
+                  onClick={handleSaveToPhotos}
+                  disabled={isSharingToPhotos || !isSupportedStickerCount(currentStickerCount)}
+                  className="focus-ring min-h-11 w-full rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  {isSharingToPhotos ? 'Preparing PNGs...' : 'Save to Photos'}
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={isDownloading || !isSupportedStickerCount(currentStickerCount)}
+                className={`focus-ring min-h-11 w-full rounded-2xl border px-4 py-3 text-sm font-semibold ${
+                  isMobile
+                    ? 'border-slate-300 bg-white text-slate-900 hover:border-indigo-500 hover:text-indigo-700'
+                    : 'border-slate-300 bg-white text-slate-900 hover:border-indigo-500 hover:text-indigo-700'
+                } disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400`}
+              >
+                {isDownloading ? 'Preparing ZIP...' : 'Download ZIP'}
+              </button>
+
+              {isMobile && !supportsFileShare() ? (
+                <p className="text-sm text-slate-600">
+                  อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน
+                </p>
+              ) : null}
+            </div>
           </section>
         )}
 

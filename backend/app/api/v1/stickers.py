@@ -19,6 +19,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+ALLOWED_STICKER_COUNTS = {15, 16}
 
 GENERATION_SEMAPHORE = asyncio.Semaphore(max(1, settings.GENERATION_CONCURRENCY))
 USER_COOLDOWN: dict[str, float] = {}
@@ -40,7 +41,7 @@ class ResetStickerSetRequest(BaseModel):
     user_id: str
 
 def _sanitize_locked_indices(indices: list[int]) -> set[int]:
-    return {idx for idx in indices if isinstance(idx, int) and 0 <= idx < 16}
+    return {idx for idx in indices if isinstance(idx, int) and idx >= 0}
 
 def _sanitize_filename(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)
@@ -101,6 +102,12 @@ async def _process_job(
             await _update_job(job_id, {"grid_blob": grid_blob})
 
             sticker_images = image_processor.process_sticker_grid(grid_bytes)
+            sticker_count = len(sticker_images)
+            if sticker_count not in ALLOWED_STICKER_COUNTS:
+                raise ValueError(
+                    f"Expected 15 or 16 stickers from the generated sheet, but detected {sticker_count}. "
+                    "The source grid layout is unsupported."
+                )
 
             output_urls: list[str] = []
             output_blobs: list[str] = []
@@ -118,16 +125,26 @@ async def _process_job(
             locked_indices = _sanitize_locked_indices(request.locked_indices)
             existing_slots, _ = await user_service.get_current_stickers(request.user_id)
             existing_map: dict[int, dict] = {}
+            existing_count = 0
             for slot in existing_slots:
                 if not isinstance(slot, dict):
                     continue
                 idx = slot.get("index")
-                if isinstance(idx, int) and 0 <= idx < 16:
+                if isinstance(idx, int) and 0 <= idx < sticker_count:
                     existing_map[idx] = slot
+            existing_count = len(existing_map)
+
+            if locked_indices and existing_count and existing_count != sticker_count:
+                raise ValueError(
+                    f"Locked regenerate requires the same sticker count, but the current set has {existing_count} "
+                    f"and the new generation has {sticker_count}."
+                )
+
+            locked_indices = {idx for idx in locked_indices if idx < sticker_count}
 
             result_slots = []
             persisted_slots = []
-            for index in range(16):
+            for index in range(sticker_count):
                 use_existing = index in locked_indices and index in existing_map
                 if use_existing:
                     existing_blob = existing_map[index].get("blob_name")
@@ -147,7 +164,14 @@ async def _process_job(
                 persisted_slots.append({"index": index, "blob_name": blob_name, "locked": locked})
 
             await user_service.set_current_stickers(request.user_id, persisted_slots, job_id)
-            await _update_job(job_id, {"status": "completed", "result_slots": persisted_slots})
+            await _update_job(
+                job_id,
+                {
+                    "status": "completed",
+                    "sticker_count": sticker_count,
+                    "result_slots": persisted_slots,
+                },
+            )
 
     except Exception as e:
         logger.error(f"Sticker generation failed for {request.user_id}. Rolling back coin deduction. Error: {e}")
@@ -185,6 +209,7 @@ async def generate_stickers(
         "job_id": job_id,
         "user_id": user_id,
         "status": "queued",
+        "sticker_count": None,
         "created_at": _utc_now(),
         "updated_at": _utc_now(),
     })
@@ -238,6 +263,7 @@ async def get_current_stickers(
     return {
         "status": "ok",
         "job_id": job_id,
+        "sticker_count": len(result_slots),
         "result_slots": result_slots,
     }
 
@@ -373,7 +399,12 @@ async def get_job_status(
                 "locked": bool(slot.get("locked", False)),
             })
         result_slots = sorted(result_slots, key=lambda s: s["index"])
-        response = {"status": "completed", "job_id": job_id, "result_slots": result_slots}
+        response = {
+            "status": "completed",
+            "job_id": job_id,
+            "sticker_count": len(result_slots),
+            "result_slots": result_slots,
+        }
         if data.get("grid_blob"):
             response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
         return response
@@ -397,7 +428,7 @@ async def download_sticker_zip(
     token_profile: dict = Depends(get_line_profile),
 ):
     """
-    Download all 16 stickers for a job as a ZIP file.
+    Download all generated stickers for a job as a ZIP file.
     """
     assert_user_match(token_profile["line_id"], user_id)
     prefix = f"users/{user_id}/jobs/{job_id}/"

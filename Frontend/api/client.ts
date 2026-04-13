@@ -17,8 +17,8 @@ const getLineAccessToken = () => {
 API.interceptors.request.use((config) => {
   const token = getLineAccessToken();
   if (token) {
-    config.headers = config.headers ?? {};
-    config.headers.Authorization = `Bearer ${token}`;
+    config.headers = config.headers ?? new axios.AxiosHeaders();
+    config.headers.set('Authorization', `Bearer ${token}`);
   }
   return config;
 });
@@ -46,8 +46,9 @@ export async function startGeneration(
   lockedIndices: number[] = [],
 ) {
   const { data } = await API.post<{
-    job_id: string;
+    job_id?: string;
     status: string;
+    sticker_count?: number;
     result_urls?: string[];
     result_slots?: Array<{ index: number; url: string; locked: boolean }>;
   }>(
@@ -62,6 +63,7 @@ export async function checkJobStatus(jobId: string) {
   const { data } = await API.get<{
     status: string;
     job_id?: string;
+    sticker_count?: number;
     result_slots?: Array<{ index: number; url: string; locked: boolean }>;
     error?: string;
   }>(
@@ -111,6 +113,7 @@ export async function getCurrentStickers(userId: string) {
   const { data } = await API.get<{
     status: 'ok' | 'empty';
     job_id?: string | null;
+    sticker_count?: number;
     result_slots?: Array<{ index: number; url: string; locked: boolean }>;
   }>(`/api/v1/jobs/current?user_id=${encodeURIComponent(userId)}`);
   return data;

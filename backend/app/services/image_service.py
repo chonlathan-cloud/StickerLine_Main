@@ -1,15 +1,19 @@
 import cv2
 import numpy as np
-import rembg
 import logging
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
 class ImageProcessor:
-    def process_sticker_grid(self, image_bytes: bytes) -> List[bytes]:
+    def process_sticker_grid(
+        self,
+        image_bytes: bytes,
+        columns: int | None = None,
+        rows: int | None = None,
+    ) -> List[bytes]:
         """
-        Process the 4x4 grid image into 16 individual stickers.
+        Process a green-background sticker grid into individual stickers.
         """
         try:
             # Step A: Load image from bytes to OpenCV format
@@ -22,22 +26,22 @@ class ImageProcessor:
             # Step A.1: Trim solid green margins (if any) to stabilize grid slicing
             grid_img = self._trim_green_margin(grid_img)
 
-            # Step A.2: Normalize to sizes divisible by 4 to avoid drift
-            grid_img = self._normalize_grid_size(grid_img)
-
             processed_stickers = []
-            
+
             # Step B: Detect grid boundaries using green gutters (fallback to equal split)
             height, width = grid_img.shape[:2]
-            y_edges = self._detect_grid_edges(grid_img, axis="y")
+            y_edges = self._detect_grid_edges(grid_img, axis="y", expected_segments=rows)
             if y_edges is None:
-                y_edges = self._equal_edges(height)
-            x_edges = self._detect_grid_edges(grid_img, axis="x")
+                y_edges = self._equal_edges(height, rows or 4)
+            x_edges = self._detect_grid_edges(grid_img, axis="x", expected_segments=columns)
             if x_edges is None:
-                x_edges = self._equal_edges(width)
+                x_edges = self._equal_edges(width, columns or 4)
 
-            for row in range(4):
-                for col in range(4):
+            row_count = len(y_edges) - 1
+            col_count = len(x_edges) - 1
+
+            for row in range(row_count):
+                for col in range(col_count):
                     # Slice the grid using fractional edges to reduce drift
                     y_start = y_edges[row]
                     y_end = y_edges[row + 1]
@@ -71,15 +75,20 @@ class ImageProcessor:
         y_end = max(height - inset_y, y_start + 1)
         return cv_img[y_start:y_end, x_start:x_end]
 
-    def _equal_edges(self, size: int) -> np.ndarray:
-        edges = np.linspace(0, size, 5).round().astype(int)
+    def _equal_edges(self, size: int, segments: int) -> np.ndarray:
+        segment_count = max(1, int(segments))
+        edges = np.linspace(0, size, segment_count + 1).round().astype(int)
         edges[-1] = size
         return edges
 
-    def _detect_grid_edges(self, cv_img: np.ndarray, axis: str) -> np.ndarray | None:
+    def _detect_grid_edges(
+        self,
+        cv_img: np.ndarray,
+        axis: str,
+        expected_segments: int | None = None,
+    ) -> np.ndarray | None:
         """
         Detect grid boundaries by finding low-content (green) gutters.
-        Returns edges array of length 5 if successful.
         """
         b, g, r = cv2.split(cv_img)
         green_mask = (g >= 200) & (r <= 60) & (b <= 60)
@@ -98,27 +107,18 @@ class ImageProcessor:
         ratios = np.convolve(ratios, kernel, mode="same")
 
         gaps = self._find_gaps(ratios, threshold=0.015, min_width=max(2, size // 200))
-        if len(gaps) < 3:
+        if not gaps:
             return None
 
-        ideal = [size * i / 4 for i in range(1, 4)]
-        centers = []
-        used = set()
-        for target in ideal:
-            candidates = [gap for gap in gaps if gap not in used]
-            if not candidates:
-                return None
-            best = min(candidates, key=lambda g: abs(g[2] - target))
-            if abs(best[2] - target) > size * 0.2:
-                return None
-            centers.append(int(round(best[2])))
-            used.add(best)
+        if expected_segments is not None:
+            return self._edges_from_expected_gaps(
+                gaps,
+                size=size,
+                segment_count=max(1, expected_segments),
+            )
 
-        centers = sorted(centers)
-        edges = np.array([0] + centers + [size], dtype=int)
-        if len(edges) != 5 or edges[0] != 0 or edges[-1] != size:
-            return None
-        return edges
+        auto_edges = self._edges_from_all_gaps(gaps, size=size)
+        return auto_edges
 
     def _find_gaps(self, ratios: np.ndarray, threshold: float, min_width: int) -> list[tuple[int, int, float]]:
         gaps = []
@@ -139,6 +139,81 @@ class ImageProcessor:
                 center = (start + end) / 2.0
                 gaps.append((start, end, center))
         return gaps
+
+    def _edges_from_expected_gaps(
+        self,
+        gaps: list[tuple[int, int, float]],
+        size: int,
+        segment_count: int,
+    ) -> np.ndarray | None:
+        required_gaps = max(0, segment_count - 1)
+        if required_gaps == 0:
+            return np.array([0, size], dtype=int)
+        if len(gaps) < required_gaps:
+            return None
+
+        ideal = [size * i / segment_count for i in range(1, segment_count)]
+        centers: list[int] = []
+        used: set[int] = set()
+        for target in ideal:
+            candidates = [
+                (idx, gap)
+                for idx, gap in enumerate(gaps)
+                if idx not in used
+            ]
+            if not candidates:
+                return None
+
+            best_idx, best_gap = min(candidates, key=lambda item: abs(item[1][2] - target))
+            if abs(best_gap[2] - target) > size * 0.22:
+                return None
+
+            centers.append(int(round(best_gap[2])))
+            used.add(best_idx)
+
+        return self._build_edges_from_centers(size=size, centers=centers)
+
+    def _edges_from_all_gaps(self, gaps: list[tuple[int, int, float]], size: int) -> np.ndarray | None:
+        if not gaps:
+            return None
+
+        merged = []
+        min_gap_separation = max(6, size // 14)
+        for gap in sorted(gaps, key=lambda item: item[2]):
+            if not merged:
+                merged.append(gap)
+                continue
+
+            prev = merged[-1]
+            if abs(gap[2] - prev[2]) < min_gap_separation:
+                merged[-1] = (
+                    min(prev[0], gap[0]),
+                    max(prev[1], gap[1]),
+                    (prev[2] + gap[2]) / 2.0,
+                )
+            else:
+                merged.append(gap)
+
+        if len(merged) > 7:
+            return None
+
+        centers = [int(round(gap[2])) for gap in merged]
+        return self._build_edges_from_centers(size=size, centers=centers)
+
+    def _build_edges_from_centers(self, size: int, centers: list[int]) -> np.ndarray | None:
+        if not centers:
+            return None
+
+        centers = sorted(set(centers))
+        edges = np.array([0] + centers + [size], dtype=int)
+        min_segment = max(12, size // 10)
+        for idx in range(len(edges) - 1):
+            if (edges[idx + 1] - edges[idx]) < min_segment:
+                return None
+
+        if edges[0] != 0 or edges[-1] != size:
+            return None
+        return edges
 
     def _trim_green_margin(self, cv_img: np.ndarray) -> np.ndarray:
         """
@@ -173,114 +248,494 @@ class ImageProcessor:
             # Fallback to original if trimming fails
             return cv_img
 
-    def _normalize_grid_size(self, cv_img: np.ndarray) -> np.ndarray:
-        """
-        Crop the grid to the nearest size divisible by 4 to prevent slice drift.
-        """
-        height, width = cv_img.shape[:2]
-        new_h = (height // 4) * 4
-        new_w = (width // 4) * 4
-
-        if new_h == height and new_w == width:
-            return cv_img
-
-        y_start = max((height - new_h) // 2, 0)
-        x_start = max((width - new_w) // 2, 0)
-        y_end = y_start + new_h
-        x_end = x_start + new_w
-
-        return cv_img[y_start:y_end, x_start:x_end]
-
     def _process_single_sticker(self, cv_img: np.ndarray) -> bytes:
-        # 1. Remove background using rembg
-        # Note: rembg removes the green/solid background and returns RGBA
-        img_with_alpha = rembg.remove(cv_img)
+        # 1. Extract foreground from the green background using a cell-local chroma key.
+        rgba = self._extract_foreground_rgba(cv_img)
+        rgba[:, :, 3] = self._filter_foreground_components(rgba[:, :, 3])
+        rgba[:, :, 3] = self._remove_pure_green_pockets(cv_img, rgba[:, :, 3])
+        rgba[:, :, 3] = self._choke_alpha(rgba[:, :, 3], choke_radius=2.0, feather=0.85)
+        rgba = self._degreen_edges(rgba)
 
-        # 1.1 Clean residual green spill before cropping
-        img_with_alpha = self._remove_green_spill(img_with_alpha)
-        
-        # 2. Remove tiny fragments then trim transparent whitespace
-        b, g, r, a = cv2.split(img_with_alpha)
-        a = self._remove_small_alpha_blobs(a)
-        y_indices, x_indices = np.where(a > 0)
-
-        if len(x_indices) > 0 and len(y_indices) > 0:
-            x_min, x_max = np.min(x_indices), np.max(x_indices)
-            y_min, y_max = np.min(y_indices), np.max(y_indices)
-            cropped_img = img_with_alpha[y_min:y_max+1, x_min:x_max+1]
+        # 2. Crop with asymmetric padding so Thai text keeps breathing room.
+        bounds = self._compute_content_bounds(rgba[:, :, 3], threshold=8)
+        if bounds is None:
+            rgba = self._build_fallback_rgba(cv_img)
         else:
-            cropped_img = img_with_alpha  # fallback if totally transparent
-            
-        # 3. Add White Stroke
-        # Add padding first so the stroke doesn't get cut off at the edges
-        pad = 12
-        padded_img = cv2.copyMakeBorder(cropped_img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=[0, 0, 0, 0])
-        b_p, g_p, r_p, a_p = cv2.split(padded_img)
-        
-        # Create a circular kernel for the stroke and use cv2.dilate on the alpha channel to create a mask
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        dilated_alpha = cv2.dilate(a_p, kernel, iterations=2)
-        
-        # Overlay the original image on a white background using the dilated alpha mask
-        final_img = np.zeros_like(padded_img)
-        
-        # Set pixels where dilated alpha is > 0 to white with full opacity
-        stroke_mask = dilated_alpha > 0
-        final_img[stroke_mask] = [255, 255, 255, 255]
-        
-        # Overwrite the white background with the original actual object pixels
-        object_mask = a_p > 0
-        final_img[object_mask] = padded_img[object_mask]
-        
-        # 4. Resize to 370x320 px maintaining aspect ratio
-        target_w, target_h = 370, 320
-        h, w = final_img.shape[:2]
-        
-        scale = min(target_w / w, target_h / h)
-        new_w, new_h = int(w * scale), int(h * scale)
-        
-        resized_img = cv2.resize(final_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        
-        # Create a blank 370x320 transparent canvas and paste the resized image in the center
-        canvas = np.zeros((target_h, target_w, 4), dtype=np.uint8)
-        x_offset = (target_w - new_w) // 2
-        y_offset = (target_h - new_h) // 2
-        
-        canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized_img
-        
-        # Encode back to PNG bytes
+            x1, y1, x2, y2 = self._expand_bounds(
+                bounds,
+                width=rgba.shape[1],
+                height=rgba.shape[0],
+                pad_x_ratio=0.07,
+                pad_top_ratio=0.06,
+                pad_bottom_ratio=0.12,
+            )
+            rgba = rgba[y1:y2, x1:x2]
+
+        # 3. Add a thin white stroke with soft edges.
+        stroked = self._add_white_stroke(
+            rgba,
+            stroke_radius=0.5,
+            feather=1.2,
+            outer_pad=8,
+            supersample=2,
+        )
+        stroked[:, :, 3] = self._trim_outer_fringe(stroked[:, :, 3], trim_radius=2.5, feather=0.8)
+
+        # 4. Resize to the output canvas using premultiplied alpha to avoid dark fringes.
+        canvas = self._resize_and_center_rgba(stroked, target_w=370, target_h=320, padding=18)
+
+        # Encode back to PNG bytes.
         is_success, buffer = cv2.imencode(".png", canvas)
         if not is_success:
             raise ValueError("Failed to encode image to PNG.")
-            
+
         return buffer.tobytes()
 
-    def _remove_green_spill(self, rgba_img: np.ndarray) -> np.ndarray:
+    def _extract_foreground_rgba(self, cv_img: np.ndarray) -> np.ndarray:
         """
-        Remove leftover green spill by zeroing alpha on near-green pixels.
+        Build a soft-alpha RGBA image from a green-screen sticker cell.
         """
-        b, g, r, a = cv2.split(rgba_img)
-        green_mask = (g >= 170) & (r <= 80) & (b <= 80)
-        a = np.where(green_mask, 0, a).astype(np.uint8)
-        return cv2.merge([b, g, r, a])
+        bg_mask = self._build_background_mask(cv_img)
+        alpha = self._build_soft_alpha(cv_img, bg_mask)
+        rgba = cv2.cvtColor(cv_img, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = alpha
+        return rgba
 
-    def _remove_small_alpha_blobs(self, alpha: np.ndarray) -> np.ndarray:
+    def _remove_pure_green_pockets(self, cv_img: np.ndarray, alpha: np.ndarray) -> np.ndarray:
         """
-        Remove tiny alpha fragments that cause random debris.
+        Remove bright chroma-green remnants that were not connected to the border.
+        These typically appear in gaps under arms, between legs, or under captions.
         """
         if alpha is None or alpha.size == 0:
             return alpha
 
-        mask = (alpha > 0).astype(np.uint8) * 255
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        b, g, r = cv2.split(cv_img)
+        h, s, _ = cv2.split(hsv)
+        green_excess = g.astype(np.int16) - np.maximum(r, b).astype(np.int16)
+
+        pure_green = (
+            (alpha > 0)
+            & (h >= 35)
+            & (h <= 90)
+            & (s >= 70)
+            & (g >= 120)
+            & (green_excess >= 55)
+        )
+        if not np.any(pure_green):
+            return alpha
+
+        pure_green_u8 = pure_green.astype(np.uint8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(pure_green_u8, connectivity=8)
+        if num_labels <= 1:
+            cleaned = alpha.copy()
+            cleaned[pure_green] = 0
+            return cleaned
+
+        cleaned = alpha.copy()
+        height, width = alpha.shape
+        max_area = max(24, int(height * width * 0.018))
+        for label in range(1, num_labels):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            touches_border = x <= 1 or y <= 1 or (x + w) >= (width - 1) or (y + h) >= (height - 1)
+            if area <= max_area or not touches_border:
+                cleaned[labels == label] = 0
+
+        return cleaned
+
+    def _choke_alpha(self, alpha: np.ndarray, choke_radius: float, feather: float) -> np.ndarray:
+        """
+        Trim 1-2px from the outer matte before adding the final stroke so edge
+        contamination does not remain visible as thin lines.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        fg_mask = (alpha > 6).astype(np.uint8)
+        if not np.any(fg_mask):
+            return alpha
+
+        distance_to_bg = cv2.distanceTransform(fg_mask, cv2.DIST_L2, 5)
+        keep_factor = np.clip((distance_to_bg - choke_radius + feather) / max(feather, 1e-3), 0.0, 1.0)
+        choked = np.clip(alpha.astype(np.float32) * keep_factor, 0.0, 255.0).astype(np.uint8)
+        return choked
+
+    def _trim_outer_fringe(self, alpha: np.ndarray, trim_radius: float, feather: float) -> np.ndarray:
+        """
+        Remove the faint outermost ring left by resampling/anti-aliasing after the
+        white stroke is generated.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        fg_mask = (alpha > 2).astype(np.uint8)
+        if not np.any(fg_mask):
+            return alpha
+
+        distance_to_bg = cv2.distanceTransform(fg_mask, cv2.DIST_L2, 5)
+        keep_factor = np.clip((distance_to_bg - trim_radius + feather) / max(feather, 1e-3), 0.0, 1.0)
+        trimmed = np.clip(alpha.astype(np.float32) * keep_factor, 0.0, 255.0).astype(np.uint8)
+        return trimmed
+
+    def _build_fallback_rgba(self, cv_img: np.ndarray) -> np.ndarray:
+        """
+        Conservative fallback when the soft matte fails entirely.
+        """
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        b, g, r = cv2.split(cv_img)
+        h, s, _ = cv2.split(hsv)
+        green_excess = g.astype(np.int16) - np.maximum(r, b).astype(np.int16)
+        green_bg = (h >= 30) & (h <= 95) & (s >= 30) & (g >= 70) & (green_excess >= 18)
+
+        rgba = cv2.cvtColor(cv_img, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = np.where(green_bg, 0, 255).astype(np.uint8)
+        return rgba
+
+    def _build_background_mask(self, cv_img: np.ndarray) -> np.ndarray:
+        """
+        Detect the green background that is connected to the outer border.
+        This avoids removing interior content that happens to be green-ish.
+        """
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(cv_img, cv2.COLOR_BGR2LAB)
+        b, g, r = cv2.split(cv_img)
+        h, s, _ = cv2.split(hsv)
+
+        green_excess = g.astype(np.int16) - np.maximum(r, b).astype(np.int16)
+        strong_green = (h >= 30) & (h <= 95) & (s >= 35) & (g >= 70) & (green_excess >= 18)
+
+        border_mask = np.zeros(strong_green.shape, dtype=bool)
+        border_mask[0, :] = True
+        border_mask[-1, :] = True
+        border_mask[:, 0] = True
+        border_mask[:, -1] = True
+
+        border_green = strong_green & border_mask
+        if np.any(border_green):
+            lab_pixels = lab[border_green]
+            lab_reference = np.median(lab_pixels, axis=0).astype(np.float32)
+            lab_distance = np.linalg.norm(lab.astype(np.float32) - lab_reference, axis=2)
+            candidate_mask = strong_green | ((lab_distance <= 42.0) & (g >= 60))
+        else:
+            candidate_mask = strong_green | ((g >= 90) & (green_excess >= 24))
+
+        candidate_u8 = candidate_mask.astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        candidate_u8 = cv2.morphologyEx(candidate_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        num_labels, labels = cv2.connectedComponents(candidate_u8, connectivity=8)
+        if num_labels <= 1:
+            return candidate_u8.astype(bool)
+
+        border_labels = np.unique(
+            np.concatenate([
+                labels[0, :],
+                labels[-1, :],
+                labels[:, 0],
+                labels[:, -1],
+            ])
+        )
+        border_labels = border_labels[border_labels != 0]
+        if border_labels.size == 0:
+            return candidate_u8.astype(bool)
+
+        bg_mask = np.isin(labels, border_labels) & candidate_mask
+        bg_u8 = (bg_mask.astype(np.uint8) * 255)
+        bg_u8 = cv2.morphologyEx(bg_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
+        return bg_u8 > 0
+
+    def _build_soft_alpha(self, cv_img: np.ndarray, bg_mask: np.ndarray) -> np.ndarray:
+        """
+        Convert the binary background mask into a soft alpha matte and suppress
+        green fringing near the subject boundary.
+        """
+        fg_mask = (~bg_mask).astype(np.uint8)
+        if not np.any(fg_mask):
+            return np.zeros(bg_mask.shape, dtype=np.uint8)
+
+        distance_to_bg = cv2.distanceTransform(fg_mask, cv2.DIST_L2, 5)
+        feather_px = 1.65
+        alpha = np.clip(distance_to_bg / feather_px, 0.0, 1.0) * 255.0
+
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        b, g, r = cv2.split(cv_img)
+        h, s, _ = cv2.split(hsv)
+        green_excess = g.astype(np.float32) - np.maximum(r, b).astype(np.float32)
+        edge_weight = np.clip((5.5 - distance_to_bg) / 5.5, 0.0, 1.0)
+        suspicious_green = (
+            (h >= 28)
+            & (h <= 98)
+            & (s >= 25)
+            & (green_excess > 10)
+            & (edge_weight > 0)
+        )
+
+        penalty = np.zeros_like(alpha, dtype=np.float32)
+        penalty[suspicious_green] = np.clip(green_excess[suspicious_green] * 1.55, 0.0, 190.0) * edge_weight[suspicious_green]
+        alpha = np.clip(alpha - penalty, 0.0, 255.0)
+        alpha[bg_mask] = 0.0
+
+        alpha_u8 = alpha.astype(np.uint8)
+        alpha_u8 = cv2.GaussianBlur(alpha_u8, (0, 0), 0.65)
+        return alpha_u8
+
+    def _filter_foreground_components(self, alpha: np.ndarray) -> np.ndarray:
+        """
+        Keep the primary sticker subject and nearby caption/accessories while
+        dropping border debris from neighboring cells or failed masks.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        mask = (alpha > 18).astype(np.uint8)
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         if num_labels <= 1:
             return alpha
 
-        min_area = max(50, int(alpha.shape[0] * alpha.shape[1] * 0.002))
-        cleaned = np.zeros_like(alpha)
+        height, width = alpha.shape
+        min_area = max(20, int(height * width * 0.00045))
+        prominent_area = max(80, int(height * width * 0.012))
+
+        component_areas = stats[1:, cv2.CC_STAT_AREA]
+        primary_label = int(np.argmax(component_areas)) + 1
+        px = int(stats[primary_label, cv2.CC_STAT_LEFT])
+        py = int(stats[primary_label, cv2.CC_STAT_TOP])
+        pw = int(stats[primary_label, cv2.CC_STAT_WIDTH])
+        ph = int(stats[primary_label, cv2.CC_STAT_HEIGHT])
+
+        expand_x = int(round(width * 0.18))
+        expand_top = int(round(height * 0.10))
+        expand_bottom = int(round(height * 0.34))
+        primary_left = max(0, px - expand_x)
+        primary_top = max(0, py - expand_top)
+        primary_right = min(width, px + pw + expand_x)
+        primary_bottom = min(height, py + ph + expand_bottom)
+
+        keep_mask = np.zeros_like(mask, dtype=bool)
         for label in range(1, num_labels):
-            x, y, w, h, area = stats[label]
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
             if area < min_area:
                 continue
-            cleaned[labels == label] = alpha[labels == label]
-        return cleaned
+
+            cx = x + (w / 2.0)
+            cy = y + (h / 2.0)
+            touches_hard_border = x <= 1 or y <= 1 or (x + w) >= (width - 1)
+            overlaps_primary = not (
+                (x + w) < primary_left
+                or x > primary_right
+                or (y + h) < primary_top
+                or y > primary_bottom
+            )
+            caption_like = (
+                primary_left <= cx <= primary_right
+                and py <= cy <= primary_bottom
+            )
+
+            keep = (
+                label == primary_label
+                or overlaps_primary
+                or caption_like
+                or (area >= prominent_area and not touches_hard_border)
+            )
+            if keep:
+                keep_mask |= labels == label
+
+        cleaned_alpha = np.where(keep_mask, alpha, 0).astype(np.uint8)
+        cleaned_mask = (cleaned_alpha > 0).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        cleaned_alpha = np.where(cleaned_mask > 0, cleaned_alpha, 0).astype(np.uint8)
+        return cleaned_alpha
+
+    def _degreen_edges(self, rgba_img: np.ndarray) -> np.ndarray:
+        """
+        Remove green halos around the matte without making the outline thick.
+        """
+        bgr = rgba_img[:, :, :3].astype(np.float32)
+        alpha = rgba_img[:, :, 3].astype(np.float32)
+        if not np.any(alpha > 0):
+            return rgba_img
+
+        hsv = cv2.cvtColor(rgba_img[:, :, :3], cv2.COLOR_BGR2HSV)
+        h, s, _ = cv2.split(hsv)
+        b = bgr[:, :, 0]
+        g = bgr[:, :, 1]
+        r = bgr[:, :, 2]
+        green_excess = g - np.maximum(r, b)
+
+        fg_mask = (alpha > 10).astype(np.uint8)
+        distance_to_edge = cv2.distanceTransform(fg_mask, cv2.DIST_L2, 5)
+        edge_strength = np.clip((5.0 - distance_to_edge) / 5.0, 0.0, 1.0)
+        suspicious = (
+            (alpha > 0)
+            & (edge_strength > 0)
+            & (h >= 28)
+            & (h <= 100)
+            & (s >= 18)
+            & (green_excess > 4)
+        )
+
+        correction = np.zeros_like(g, dtype=np.float32)
+        correction[suspicious] = np.clip(green_excess[suspicious] * 0.85, 0.0, 110.0) * edge_strength[suspicious]
+        g[suspicious] = np.maximum(0.0, g[suspicious] - correction[suspicious])
+        r[suspicious] = np.minimum(255.0, r[suspicious] + correction[suspicious] * 0.33)
+        b[suspicious] = np.minimum(255.0, b[suspicious] + correction[suspicious] * 0.42)
+
+        severe_spill = suspicious & (green_excess > 16)
+        alpha[severe_spill] = np.maximum(
+            0.0,
+            alpha[severe_spill] - correction[severe_spill] * 1.15,
+        )
+
+        out = np.dstack([
+            b.astype(np.uint8),
+            g.astype(np.uint8),
+            r.astype(np.uint8),
+            alpha.astype(np.uint8),
+        ])
+        return out
+
+    def _compute_content_bounds(self, alpha: np.ndarray, threshold: int = 8) -> Tuple[int, int, int, int] | None:
+        indices = np.where(alpha > threshold)
+        if indices[0].size == 0 or indices[1].size == 0:
+            return None
+
+        y1 = int(indices[0].min())
+        y2 = int(indices[0].max()) + 1
+        x1 = int(indices[1].min())
+        x2 = int(indices[1].max()) + 1
+        return x1, y1, x2, y2
+
+    def _expand_bounds(
+        self,
+        bounds: Tuple[int, int, int, int],
+        width: int,
+        height: int,
+        pad_x_ratio: float,
+        pad_top_ratio: float,
+        pad_bottom_ratio: float,
+    ) -> Tuple[int, int, int, int]:
+        x1, y1, x2, y2 = bounds
+        box_w = max(1, x2 - x1)
+        box_h = max(1, y2 - y1)
+        pad_x = max(6, int(round(box_w * pad_x_ratio)))
+        pad_top = max(6, int(round(box_h * pad_top_ratio)))
+        pad_bottom = max(8, int(round(box_h * pad_bottom_ratio)))
+
+        return (
+            max(0, x1 - pad_x),
+            max(0, y1 - pad_top),
+            min(width, x2 + pad_x),
+            min(height, y2 + pad_bottom),
+        )
+
+    def _add_white_stroke(
+        self,
+        rgba_img: np.ndarray,
+        stroke_radius: float,
+        feather: float,
+        outer_pad: int,
+        supersample: int,
+    ) -> np.ndarray:
+        if rgba_img.size == 0:
+            return rgba_img
+
+        src_h, src_w = rgba_img.shape[:2]
+        upscaled = self._resize_rgba_premultiplied(
+            rgba_img,
+            new_w=max(1, src_w * supersample),
+            new_h=max(1, src_h * supersample),
+        )
+        pad = max(0, outer_pad * supersample)
+        if pad > 0:
+            upscaled = cv2.copyMakeBorder(
+                upscaled,
+                pad,
+                pad,
+                pad,
+                pad,
+                cv2.BORDER_CONSTANT,
+                value=[0, 0, 0, 0],
+            )
+
+        alpha = upscaled[:, :, 3].astype(np.float32) / 255.0
+        fg_mask = (alpha > 0.02).astype(np.uint8)
+        outside = (fg_mask == 0).astype(np.uint8)
+        distance_to_fg = cv2.distanceTransform(outside, cv2.DIST_L2, 5)
+
+        radius_px = stroke_radius * supersample
+        feather_px = max(1.0, feather * supersample)
+        stroke_alpha = np.zeros_like(alpha, dtype=np.float32)
+
+        hard_band = distance_to_fg <= radius_px
+        soft_band = (distance_to_fg > radius_px) & (distance_to_fg <= (radius_px + feather_px))
+        stroke_alpha[hard_band] = 1.0
+        stroke_alpha[soft_band] = 1.0 - ((distance_to_fg[soft_band] - radius_px) / feather_px)
+        stroke_alpha[fg_mask > 0] = 0.0
+
+        object_rgb = upscaled[:, :, :3].astype(np.float32) / 255.0
+        object_a = alpha[..., None]
+        stroke_a = stroke_alpha[..., None]
+
+        premult_object = object_rgb * object_a
+        premult_stroke = np.ones_like(object_rgb, dtype=np.float32) * stroke_a
+        out_a = object_a + stroke_a * (1.0 - object_a)
+        out_rgb = premult_object + (premult_stroke * (1.0 - object_a))
+
+        composed = np.zeros_like(upscaled, dtype=np.uint8)
+        non_zero = out_a[:, :, 0] > 1e-6
+        composed_alpha = np.clip(out_a[:, :, 0] * 255.0, 0.0, 255.0).astype(np.uint8)
+        composed_rgb = np.zeros_like(object_rgb, dtype=np.float32)
+        composed_rgb[non_zero] = out_rgb[non_zero] / out_a[non_zero]
+        composed[:, :, :3] = np.clip(composed_rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+        composed[:, :, 3] = composed_alpha
+
+        return self._resize_rgba_premultiplied(composed, new_w=src_w + (outer_pad * 2), new_h=src_h + (outer_pad * 2))
+
+    def _resize_and_center_rgba(self, rgba_img: np.ndarray, target_w: int, target_h: int, padding: int) -> np.ndarray:
+        src_h, src_w = rgba_img.shape[:2]
+        available_w = max(1, target_w - (padding * 2))
+        available_h = max(1, target_h - (padding * 2))
+        scale = min(available_w / max(src_w, 1), available_h / max(src_h, 1))
+
+        new_w = max(1, int(round(src_w * scale)))
+        new_h = max(1, int(round(src_h * scale)))
+        resized = self._resize_rgba_premultiplied(rgba_img, new_w=new_w, new_h=new_h)
+
+        canvas = np.zeros((target_h, target_w, 4), dtype=np.uint8)
+        x_offset = (target_w - new_w) // 2
+        y_offset = (target_h - new_h) // 2
+        canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
+        return canvas
+
+    def _resize_rgba_premultiplied(self, rgba_img: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
+        if rgba_img.shape[0] == new_h and rgba_img.shape[1] == new_w:
+            return rgba_img.copy()
+
+        alpha = rgba_img[:, :, 3:4].astype(np.float32) / 255.0
+        rgb = rgba_img[:, :, :3].astype(np.float32) / 255.0
+        premult = rgb * alpha
+
+        interpolation = cv2.INTER_AREA if (new_w < rgba_img.shape[1] or new_h < rgba_img.shape[0]) else cv2.INTER_CUBIC
+        resized_premult = cv2.resize(premult, (new_w, new_h), interpolation=interpolation)
+        resized_alpha = cv2.resize(alpha, (new_w, new_h), interpolation=interpolation)
+        if resized_alpha.ndim == 2:
+            resized_alpha = resized_alpha[:, :, None]
+        resized_alpha = np.clip(resized_alpha, 0.0, 1.0)
+
+        restored_rgb = np.zeros_like(resized_premult, dtype=np.float32)
+        non_zero = resized_alpha[:, :, 0] > 1e-6
+        restored_rgb[non_zero] = resized_premult[non_zero] / resized_alpha[non_zero, 0][:, None]
+
+        out = np.zeros((new_h, new_w, 4), dtype=np.uint8)
+        out[:, :, :3] = np.clip(restored_rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+        out[:, :, 3] = np.clip(resized_alpha[:, :, 0] * 255.0, 0.0, 255.0).astype(np.uint8)
+        return out
