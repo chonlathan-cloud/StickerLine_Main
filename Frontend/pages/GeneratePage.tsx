@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { StickerStyle, StickerSheetConfig } from '../types';
-import { getCurrentStickersDownloadUrl, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
+import { downloadCurrentStickerForShare, getCurrentStickersDownloadUrl, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
 import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
@@ -338,7 +338,7 @@ const GeneratePage: React.FC = () => {
   };
 
   const handleSaveToPhotos = async () => {
-    if (!isSupportedStickerCount(stickerSlots.length)) {
+    if (!profile?.userId || !isSupportedStickerCount(stickerSlots.length)) {
       setError('Save to Photos is not ready yet. Please generate stickers first.');
       return;
     }
@@ -353,13 +353,8 @@ const GeneratePage: React.FC = () => {
       setError(null);
 
       const files = await Promise.all(
-        stickerSlots.map(async (slot, index) => {
-          const response = await fetch(slot.url);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch sticker ${index + 1}`);
-          }
-
-          const blob = await response.blob();
+        stickerSlots.map(async (_slot, index) => {
+          const blob = await downloadCurrentStickerForShare(profile.userId, index);
           return new File(
             [blob],
             `sticker-${String(index + 1).padStart(2, '0')}.png`,
@@ -382,10 +377,12 @@ const GeneratePage: React.FC = () => {
         return;
       }
 
-      const message = err?.message || 'Save to Photos failed.';
-      setError(message.includes('Failed to fetch')
-        ? 'ไม่สามารถเตรียมไฟล์ PNG สำหรับ Save to Photos ได้ กรุณาลอง Download ZIP แทน'
-        : message);
+      const message = err?.response?.data?.detail || err?.message || 'Save to Photos failed.';
+      setError(
+        /fetch|load failed|networkerror|prepare sticker/i.test(message)
+          ? 'ไม่สามารถเตรียมไฟล์ PNG สำหรับ Save to Photos ได้ กรุณาลอง Download ZIP แทน'
+          : message
+      );
     } finally {
       setIsSharingToPhotos(false);
     }

@@ -28,17 +28,13 @@ class ImageProcessor:
 
             processed_stickers = []
 
-            # Step B: Detect grid boundaries using green gutters (fallback to equal split)
-            height, width = grid_img.shape[:2]
-            y_edges = self._detect_grid_edges(grid_img, axis="y", expected_segments=rows)
-            if y_edges is None:
-                y_edges = self._equal_edges(height, rows or 4)
-            x_edges = self._detect_grid_edges(grid_img, axis="x", expected_segments=columns)
-            if x_edges is None:
-                x_edges = self._equal_edges(width, columns or 4)
-
-            row_count = len(y_edges) - 1
-            col_count = len(x_edges) - 1
+            # Step B: Resolve the grid layout using the supported production layouts.
+            col_count, row_count, x_edges, y_edges = self._resolve_grid_layout(
+                grid_img,
+                columns=columns,
+                rows=rows,
+            )
+            logger.info("Resolved sticker grid layout as %dx%d.", col_count, row_count)
 
             for row in range(row_count):
                 for col in range(col_count):
@@ -81,6 +77,168 @@ class ImageProcessor:
         edges[-1] = size
         return edges
 
+    def _resolve_grid_layout(
+        self,
+        cv_img: np.ndarray,
+        columns: int | None,
+        rows: int | None,
+    ) -> Tuple[int, int, np.ndarray, np.ndarray]:
+        """
+        Resolve the production grid layout. When the caller does not force a
+        layout, evaluate only the supported outputs and pick the best-scoring
+        candidate instead of trusting raw gap detection blindly.
+        """
+        height, width = cv_img.shape[:2]
+        if columns is not None and rows is not None:
+            x_edges = self._detect_grid_edges(cv_img, axis="x", expected_segments=columns)
+            y_edges = self._detect_grid_edges(cv_img, axis="y", expected_segments=rows)
+            return (
+                int(columns),
+                int(rows),
+                x_edges if x_edges is not None else self._equal_edges(width, columns),
+                y_edges if y_edges is not None else self._equal_edges(height, rows),
+            )
+
+        candidates = self._candidate_layouts_for_image(width=width, height=height)
+        best_layout: Tuple[int, int] | None = None
+        best_x_edges: np.ndarray | None = None
+        best_y_edges: np.ndarray | None = None
+        best_score = float("-inf")
+
+        for candidate_columns, candidate_rows in candidates:
+            x_edges_detected = self._detect_grid_edges(cv_img, axis="x", expected_segments=candidate_columns)
+            y_edges_detected = self._detect_grid_edges(cv_img, axis="y", expected_segments=candidate_rows)
+            x_edges = x_edges_detected if x_edges_detected is not None else self._equal_edges(width, candidate_columns)
+            y_edges = y_edges_detected if y_edges_detected is not None else self._equal_edges(height, candidate_rows)
+            score = self._score_grid_layout(
+                cv_img,
+                columns=candidate_columns,
+                rows=candidate_rows,
+                x_edges=x_edges,
+                y_edges=y_edges,
+                used_detected_x=x_edges_detected is not None,
+                used_detected_y=y_edges_detected is not None,
+            )
+            if score > best_score:
+                best_score = score
+                best_layout = (candidate_columns, candidate_rows)
+                best_x_edges = x_edges
+                best_y_edges = y_edges
+
+        if best_layout is None or best_x_edges is None or best_y_edges is None:
+            fallback_columns = columns or 4
+            fallback_rows = rows or 4
+            return (
+                fallback_columns,
+                fallback_rows,
+                self._equal_edges(width, fallback_columns),
+                self._equal_edges(height, fallback_rows),
+            )
+
+        return best_layout[0], best_layout[1], best_x_edges, best_y_edges
+
+    def _candidate_layouts_for_image(self, width: int, height: int) -> list[Tuple[int, int]]:
+        aspect = width / max(height, 1)
+        if aspect >= 1.12:
+            return [(5, 3), (4, 4), (3, 5)]
+        if aspect <= 0.88:
+            return [(3, 5), (4, 4), (5, 3)]
+        return [(4, 4), (5, 3), (3, 5)]
+
+    def _score_grid_layout(
+        self,
+        cv_img: np.ndarray,
+        columns: int,
+        rows: int,
+        x_edges: np.ndarray,
+        y_edges: np.ndarray,
+        used_detected_x: bool,
+        used_detected_y: bool,
+    ) -> float:
+        green_mask = self._grid_green_mask(cv_img)
+        content_mask = ~green_mask
+        gutter_score = self._score_gutters(green_mask, x_edges=x_edges, y_edges=y_edges)
+        content_score = self._score_cells(content_mask, x_edges=x_edges, y_edges=y_edges)
+
+        width_segments = np.diff(x_edges).astype(np.float32)
+        height_segments = np.diff(y_edges).astype(np.float32)
+        width_variation = float(width_segments.std() / max(width_segments.mean(), 1.0))
+        height_variation = float(height_segments.std() / max(height_segments.mean(), 1.0))
+
+        detection_bonus = 0.0
+        if used_detected_x:
+            detection_bonus += 0.22
+        if used_detected_y:
+            detection_bonus += 0.22
+
+        layout_bias = 0.0
+        if columns == rows == 4:
+            layout_bias += 0.08
+        elif columns == 5 and rows == 3:
+            layout_bias += 0.04
+
+        return (
+            (gutter_score * 4.2)
+            + (content_score * 3.4)
+            + detection_bonus
+            + layout_bias
+            - (width_variation * 1.2)
+            - (height_variation * 1.2)
+        )
+
+    def _grid_green_mask(self, cv_img: np.ndarray) -> np.ndarray:
+        b, g, r = cv2.split(cv_img)
+        return (g >= 185) & (r <= 75) & (b <= 75)
+
+    def _score_gutters(self, green_mask: np.ndarray, x_edges: np.ndarray, y_edges: np.ndarray) -> float:
+        height, width = green_mask.shape
+        strip_x = max(2, width // 180)
+        strip_y = max(2, height // 180)
+        scores: list[float] = []
+
+        for x in x_edges[1:-1]:
+            left = max(0, int(x) - strip_x)
+            right = min(width, int(x) + strip_x)
+            if right > left:
+                scores.append(float(green_mask[:, left:right].mean()))
+
+        for y in y_edges[1:-1]:
+            top = max(0, int(y) - strip_y)
+            bottom = min(height, int(y) + strip_y)
+            if bottom > top:
+                scores.append(float(green_mask[top:bottom, :].mean()))
+
+        if not scores:
+            return 0.0
+
+        return float(np.mean(scores))
+
+    def _score_cells(self, content_mask: np.ndarray, x_edges: np.ndarray, y_edges: np.ndarray) -> float:
+        ratios: list[float] = []
+        active_cells = 0
+        total_cells = max(1, (len(x_edges) - 1) * (len(y_edges) - 1))
+
+        for row in range(len(y_edges) - 1):
+            for col in range(len(x_edges) - 1):
+                y1, y2 = int(y_edges[row]), int(y_edges[row + 1])
+                x1, x2 = int(x_edges[col]), int(x_edges[col + 1])
+                if y2 <= y1 or x2 <= x1:
+                    continue
+                cell_ratio = float(content_mask[y1:y2, x1:x2].mean())
+                ratios.append(cell_ratio)
+                if cell_ratio >= 0.06:
+                    active_cells += 1
+
+        if not ratios:
+            return 0.0
+
+        ratio_mean = float(np.mean(ratios))
+        ratio_std = float(np.std(ratios))
+        active_score = active_cells / total_cells
+        density_score = max(0.0, 1.0 - min(1.0, abs(ratio_mean - 0.34) / 0.34))
+
+        return (active_score * 0.72) + (density_score * 0.28) - (ratio_std * 0.45)
+
     def _detect_grid_edges(
         self,
         cv_img: np.ndarray,
@@ -90,8 +248,7 @@ class ImageProcessor:
         """
         Detect grid boundaries by finding low-content (green) gutters.
         """
-        b, g, r = cv2.split(cv_img)
-        green_mask = (g >= 200) & (r <= 60) & (b <= 60)
+        green_mask = self._grid_green_mask(cv_img)
         content_mask = ~green_mask
 
         if axis == "y":

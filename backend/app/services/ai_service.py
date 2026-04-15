@@ -56,6 +56,7 @@ class AIService:
         r"(no text|without text|no caption|ไม่มีข้อความ|ไม่ต้องมีข้อความ|ไม่มีแคปชัน)",
         re.IGNORECASE,
     )
+    QUOTED_CAPTION_PATTERN = re.compile(r"[\"“”']([^\"“”'\n]{1,32})[\"“”']")
     GEMINI_PROVIDER_ALIASES = {"gemini_api", "gemini", "ai_studio", "genai"}
     RATE_LIMIT_USER_MESSAGE = "ระบบหนาแน่น กรุณารอ 5 นาที แล้วลองใหม่"
 
@@ -100,10 +101,62 @@ class AIService:
             return self.LOCKED_PROMPT_PIXAR_3D
         raise ValueError(f"Unsupported style_id: {style_id}. Expected chibi_2d or pixar_3d.")
 
+    def _extract_explicit_captions(self, extra_prompt: Optional[str]) -> list[str]:
+        if not extra_prompt:
+            return []
+
+        captions: list[str] = []
+        seen: set[str] = set()
+        for match in self.QUOTED_CAPTION_PATTERN.findall(extra_prompt):
+            caption = " ".join(match.split()).strip()
+            if not caption or caption in seen:
+                continue
+            if len(caption) > 24:
+                continue
+            seen.add(caption)
+            captions.append(caption)
+
+        return captions[:16]
+
     def _build_text_instruction(self, extra_prompt: Optional[str]) -> str:
         no_text_requested = bool(extra_prompt and self.NO_TEXT_PATTERN.search(extra_prompt))
         if no_text_requested:
             return "Generate stickers without any text captions."
+
+        explicit_captions = self._extract_explicit_captions(extra_prompt)
+        if explicit_captions:
+            return (
+                "MANDATORY TEXT CAPTIONS:\n"
+                f"- Use these user-provided captions exactly as written, preserving order when possible: {', '.join(explicit_captions)}.\n"
+                "- Do not replace them with generic LINE sticker phrases.\n"
+                "- If the sheet has more cells than provided captions, create the remaining captions in the same tone and theme as the user prompt.\n"
+                "- Place caption at bottom-center of each cell, clearly separated from face/hands.\n"
+                "- Typography style: Google Fonts look (Kanit ExtraBold or Noto Sans Thai Black style).\n"
+                "- Text render: solid black letters with thick white outline and soft shadow for high readability.\n"
+                "- Keep caption large and readable in chat size, but do not clip text at cell edges.\n"
+                "- Thai glyph integrity is mandatory: all vowels/diacritics/tonemarks must remain complete and visible.\n"
+                "- Do not drop, merge, crop, or distort any Thai marks.\n"
+                "- Keep extra vertical safety above/below text so lower vowels and upper tone marks are never cut.\n"
+                "- Outline must stay outside glyph strokes and must not cover interior Thai marks."
+            )
+
+        if extra_prompt and extra_prompt.strip():
+            return (
+                "TEXT CAPTION POLICY:\n"
+                "- Derive captions from the user's prompt and theme below.\n"
+                "- Do not fall back to the default generic caption set unless the user explicitly asks for it.\n"
+                "- Make captions, poses, mood, and props clearly reflect the user's requested scenario.\n"
+                "- Keep each caption short, chat-friendly, and semantically varied across the sheet.\n"
+                "- Place caption at bottom-center of each cell, clearly separated from face/hands.\n"
+                "- Typography style: Google Fonts look (Kanit ExtraBold or Noto Sans Thai Black style).\n"
+                "- Text render: solid black letters with thick white outline and soft shadow for high readability.\n"
+                "- Keep caption large and readable in chat size, but do not clip text at cell edges.\n"
+                "- Thai glyph integrity is mandatory: all vowels/diacritics/tonemarks must remain complete and visible.\n"
+                "- Do not drop, merge, crop, or distort any Thai marks.\n"
+                "- Keep extra vertical safety above/below text so lower vowels and upper tone marks are never cut.\n"
+                "- Outline must stay outside glyph strokes and must not cover interior Thai marks."
+            )
+
         return (
             "MANDATORY TEXT CAPTIONS:\n"
             f"- Add one short Thai caption per sticker using this set: {', '.join(self.DEFAULT_THAI_CAPTIONS)}.\n"
@@ -116,6 +169,23 @@ class AIService:
             "- Do not drop, merge, crop, or distort any Thai marks; spelling must be exactly correct.\n"
             "- Keep extra vertical safety above/below text so lower vowels and upper tone marks are never cut.\n"
             "- Outline must stay outside glyph strokes and must not cover interior Thai marks."
+        )
+
+    def _build_user_direction_instruction(self, extra_prompt: Optional[str]) -> str:
+        if extra_prompt and extra_prompt.strip():
+            prompt_text = extra_prompt.strip()
+            return (
+                "USER CREATIVE DIRECTION (HIGH PRIORITY):\n"
+                f"{prompt_text}\n"
+                "- Treat the user direction above as the primary source for caption wording, scene ideas, gestures, props, emotions, and overall tone.\n"
+                "- Keep the same person identity from the uploaded photo, but adapt the sticker set to the user's requested concept.\n"
+                "- Avoid reverting to the standard generic greeting/thanks/okay sticker pack unless the user explicitly asks for those phrases."
+            )
+
+        return (
+            "USER CREATIVE DIRECTION:\n"
+            "- Maintain subject identity faithfully.\n"
+            "- Use a natural, chat-friendly variety of poses and expressions."
         )
 
     async def generate_sticker_grid(
@@ -131,18 +201,15 @@ class AIService:
         try:
             style_prompt = self._resolve_style_prompt(style_id)
             text_instruction = self._build_text_instruction(extra_prompt)
-            character_likeness = (
-                extra_prompt.strip()
-                if extra_prompt and extra_prompt.strip()
-                else "Maintain subject identity faithfully."
-            )
+            user_direction = self._build_user_direction_instruction(extra_prompt)
 
             full_prompt = (
                 f"{self.TECHNICAL_TOKENS}\n"
                 "Objective: Create a professional 16-pose sticker sheet (4 columns x 4 rows) based on the uploaded photo.\n"
                 f"{style_prompt}\n"
                 f"{text_instruction}\n"
-                f"Character Likeness: {character_likeness}\n"
+                f"{user_direction}\n"
+                "Subject Identity Rule: maintain recognizable facial identity from the uploaded photo.\n"
                 "Character should be positioned clearly in each grid cell."
             ).strip()
 

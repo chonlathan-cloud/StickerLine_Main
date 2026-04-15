@@ -138,3 +138,17 @@ export async function getCurrentStickersDownloadUrl(userId: string) {
   );
   return data;
 }
+
+export async function downloadCurrentStickerForShare(userId: string, index: number) {
+  const { data } = await API.get<Blob>(
+    `/api/v1/jobs/current/share-file?user_id=${encodeURIComponent(userId)}&index=${index}`,
+    {
+      responseType: 'blob',
+      headers: {
+        Accept: 'image/png',
+        'Cache-Control': 'no-store',
+      },
+    },
+  );
+  return data;
+}

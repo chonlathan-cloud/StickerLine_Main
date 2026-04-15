@@ -367,6 +367,54 @@ async def get_current_sticker_download_url(
 
     return {"url": url}
 
+@router.get("/current/share-file")
+async def get_current_sticker_share_file(
+    user_id: str = Query(..., min_length=3),
+    index: int = Query(..., ge=0),
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    """
+    Stream a single sticker PNG from the current set for mobile share flows.
+    """
+    assert_user_match(token_profile["line_id"], user_id)
+    slots, _ = await user_service.get_current_stickers(user_id)
+    if not slots:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No stickers found for this user.")
+
+    target_slot = None
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        try:
+            slot_index = int(slot.get("index", -1))
+        except Exception:
+            continue
+        if slot_index == index:
+            target_slot = slot
+            break
+
+    if not target_slot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sticker not found.")
+
+    blob_name = target_slot.get("blob_name")
+    if not blob_name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sticker blob is unavailable.")
+
+    blob = storage_client.bucket.blob(blob_name)
+    try:
+        sticker_bytes = blob.download_as_bytes()
+    except Exception as exc:
+        logger.error("Failed to download sticker blob %s for share: %s", blob_name, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to prepare sticker file.") from exc
+
+    headers = {
+        "Content-Disposition": f'inline; filename="sticker-{index + 1:02d}.png"',
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(BytesIO(sticker_bytes), media_type="image/png", headers=headers)
+
 @router.get("/{job_id}")
 async def get_job_status(
     job_id: str,

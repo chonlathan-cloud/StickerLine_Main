@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/Frontend/.env}"
+
+if [[ -f "${ENV_FILE}" ]]; then
+  # Load defaults from Frontend/.env without clobbering explicitly provided env vars.
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[2]}"
+      raw_value="${BASH_REMATCH[3]}"
+
+      if [[ -z "${!key+x}" ]]; then
+        if [[ "${raw_value}" =~ ^\"(.*)\"$ ]]; then
+          value="${BASH_REMATCH[1]}"
+        elif [[ "${raw_value}" =~ ^\'(.*)\'$ ]]; then
+          value="${BASH_REMATCH[1]}"
+        else
+          value="${raw_value}"
+        fi
+
+        export "${key}=${value}"
+      fi
+    fi
+  done < "${ENV_FILE}"
+fi
+
 PROJECT_ID="${PROJECT_ID:-skitkerline}"
 REGION="${REGION:-asia-southeast1}"
 REPO="${REPO:-asia-southeast1-docker.pkg.dev/${PROJECT_ID}/stickerline}"
