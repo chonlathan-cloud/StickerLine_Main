@@ -1,7 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { StickerStyle, StickerSheetConfig } from '../types';
-import { downloadCurrentStickerForShare, getCurrentStickersDownloadUrl, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
+import {
+  applyCurrentExtraPicks,
+  downloadCurrentStickerForShare,
+  ExtraPickResponse,
+  getCurrentStickersDownloadUrl,
+  getCurrentStickers,
+  resetCurrentStickers,
+  StickerSlotResponse,
+  unlockCurrentExtraPicks,
+  uploadImage,
+  startGeneration,
+  checkJobStatus,
+} from '../api/client';
 import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
@@ -9,7 +21,7 @@ import { useAuth } from '../providers/AuthProvider';
 type ProcessingStep = 'idle' | 'analyzing' | 'generating' | 'removing' | 'complete';
 
 const DEFAULT_STICKER_COUNT = 16;
-const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
+const ALLOWED_STICKER_COUNTS = new Set([16]);
 const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
 const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
 const DOWNLOAD_DELAY_MS = 180;
@@ -18,6 +30,22 @@ interface StickerSlot {
   id: string;
   url: string;
   locked: boolean;
+}
+
+interface ExtraPickSlot {
+  id: string;
+  index: number;
+  url: string | null;
+}
+
+interface CurrentGenerationPayload {
+  status: 'ok' | 'empty';
+  job_id?: string | null;
+  sticker_count?: number;
+  result_slots?: StickerSlotResponse[];
+  extra_pick_count?: number;
+  extra_picks_unlocked?: boolean;
+  extra_picks?: ExtraPickResponse[];
 }
 
 const isSupportedStickerCount = (count: number) => ALLOWED_STICKER_COUNTS.has(count);
@@ -53,7 +81,7 @@ const GeneratePage: React.FC = () => {
   const [stickerSlots, setStickerSlots] = useState<StickerSlot[]>([]);
   const [hasGenerated, setHasGenerated] = useState(false);
   const isOnline = useOnlineStatus();
-  const { profile, coinBalance } = useAuth();
+  const { profile, coinBalance, refreshProfile } = useAuth();
   const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
   const [generationTargetCount, setGenerationTargetCount] = useState(DEFAULT_STICKER_COUNT);
   const [isComplianceChecking, setIsComplianceChecking] = useState(false);
@@ -61,6 +89,11 @@ const GeneratePage: React.FC = () => {
   const [jobId, setJobId] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [isSharingToPhotos, setIsSharingToPhotos] = useState(false);
+  const [extraPickSlots, setExtraPickSlots] = useState<ExtraPickSlot[]>([]);
+  const [isExtraPicksUnlocked, setIsExtraPicksUnlocked] = useState(false);
+  const [selectedExtraPickIndices, setSelectedExtraPickIndices] = useState<number[]>([]);
+  const [isUnlockingExtraPicks, setIsUnlockingExtraPicks] = useState(false);
+  const [isApplyingExtraPicks, setIsApplyingExtraPicks] = useState(false);
 
   const [config, setConfig] = useState<StickerSheetConfig>({
     base64Image: '',
@@ -73,6 +106,42 @@ const GeneratePage: React.FC = () => {
   // Backend-driven: no local AI/image-processing refs needed
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resultRef = useRef<HTMLElement>(null);
+
+  const hydrateCurrentGeneration = (data: CurrentGenerationPayload) => {
+    const now = Date.now();
+    const resultSlots = data.result_slots ?? [];
+    const stickerCount = resultSlots.length;
+    const extraPicks = data.extra_picks ?? [];
+
+    if (data.status === 'ok' && isSupportedStickerCount(stickerCount)) {
+      const slots = resultSlots.map((slot, index) => ({
+        id: `${data.job_id ?? now}-${index}`,
+        url: slot.url,
+        locked: slot.locked,
+      }));
+      setStickerSlots(slots);
+      setTransparentImageUrl(slots[0]?.url ?? null);
+      setHasGenerated(true);
+      setJobId(data.job_id ?? null);
+      setGenerationTargetCount(stickerCount);
+    } else if (data.status === 'empty') {
+      setStickerSlots([]);
+      setTransparentImageUrl(null);
+      setHasGenerated(false);
+      setJobId(data.job_id ?? null);
+      setGenerationTargetCount(DEFAULT_STICKER_COUNT);
+    }
+
+    setExtraPickSlots(
+      extraPicks.map((pick, index) => ({
+        id: `${data.job_id ?? now}-extra-${index}`,
+        index: pick.index,
+        url: pick.url ?? null,
+      })),
+    );
+    setIsExtraPicksUnlocked(Boolean(data.extra_picks_unlocked));
+    setSelectedExtraPickIndices([]);
+  };
 
   useEffect(() => {
     if (!loading) {
@@ -111,20 +180,7 @@ const GeneratePage: React.FC = () => {
       if (!profile?.userId) return;
       try {
         const data = await getCurrentStickers(profile.userId);
-        const slotCount = data.result_slots?.length ?? 0;
-        if (data.status === 'ok' && data.result_slots && isSupportedStickerCount(slotCount)) {
-          const now = Date.now();
-          const slots = data.result_slots.map((slot, index) => ({
-            id: `${data.job_id ?? now}-${index}`,
-            url: slot.url,
-            locked: slot.locked,
-          }));
-          setStickerSlots(slots);
-          setTransparentImageUrl(slots[0]?.url ?? null);
-          setHasGenerated(true);
-          setJobId(data.job_id ?? null);
-          setGenerationTargetCount(slotCount);
-        }
+        hydrateCurrentGeneration(data);
       } catch {
         // Non-blocking: ignore load failures for current set
       }
@@ -149,6 +205,9 @@ const GeneratePage: React.FC = () => {
         setHasGenerated(false);
         setTransparentImageUrl(null);
         setStickerSlots([]);
+        setExtraPickSlots([]);
+        setIsExtraPicksUnlocked(false);
+        setSelectedExtraPickIndices([]);
         setJobId(null);
         setGenerationTargetCount(DEFAULT_STICKER_COUNT);
         setError(null);
@@ -202,7 +261,7 @@ const GeneratePage: React.FC = () => {
       const maxAttempts = 180;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const statusResp = await checkJobStatus(jobId);
-        if (statusResp.status === 'completed' && statusResp.result_slots) {
+        if (statusResp.status === 'completed') {
           return statusResp;
         }
         if (statusResp.status === 'failed') {
@@ -232,19 +291,14 @@ const GeneratePage: React.FC = () => {
         resolved = await pollUntilComplete(jobResp.job_id);
       }
 
-      const resultCount = resolved.result_slots?.length ?? 0;
-      if (resolved.status === 'completed' && resolved.result_slots && isSupportedStickerCount(resultCount)) {
-        const now = Date.now();
-        const slots = resolved.result_slots.map((slot, index) => ({
-          id: `${resolved.job_id ?? now}-${index}`,
-          url: slot.url,
-          locked: slot.locked,
-        }));
+      if (resolved.status === 'completed') {
+        const currentData = await getCurrentStickers(profile.userId);
+        const resultCount = currentData.result_slots?.length ?? 0;
+        if (!isSupportedStickerCount(resultCount)) {
+          throw new Error('Generation finished but the current sticker set is incomplete.');
+        }
 
-        setStickerSlots(slots);
-        setJobId(resolved.job_id || null);
-        setTransparentImageUrl(slots[0]?.url ?? null);
-        setHasGenerated(true);
+        hydrateCurrentGeneration(currentData);
         finalStickerCount = resultCount;
         setGenerationTargetCount(resultCount);
         setProcessingStep('complete');
@@ -278,6 +332,52 @@ const GeneratePage: React.FC = () => {
       )
     );
     setError(null);
+  };
+
+  const toggleExtraPickSelection = (index: number) => {
+    setSelectedExtraPickIndices((prev) =>
+      prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index].sort((a, b) => a - b),
+    );
+    setError(null);
+  };
+
+  const handleUnlockExtraPicks = async () => {
+    if (!profile?.userId || extraPickSlots.length === 0) {
+      setError('ไม่มี Extra Picks ให้ปลดล็อกในรอบนี้');
+      return;
+    }
+
+    try {
+      setIsUnlockingExtraPicks(true);
+      setError(null);
+      const data = await unlockCurrentExtraPicks(profile.userId);
+      hydrateCurrentGeneration(data);
+      await refreshProfile();
+    } catch (err: any) {
+      const message = err?.response?.data?.detail || err?.message || 'Failed to unlock Extra Picks.';
+      setError(message);
+    } finally {
+      setIsUnlockingExtraPicks(false);
+    }
+  };
+
+  const handleApplyExtraPicks = async () => {
+    if (!profile?.userId || selectedExtraPickIndices.length === 0) {
+      setError('เลือก Extra Picks อย่างน้อย 1 รูปก่อน');
+      return;
+    }
+
+    try {
+      setIsApplyingExtraPicks(true);
+      setError(null);
+      const data = await applyCurrentExtraPicks(profile.userId, selectedExtraPickIndices);
+      hydrateCurrentGeneration(data);
+    } catch (err: any) {
+      const message = err?.response?.data?.detail || err?.message || 'Failed to apply Extra Picks.';
+      setError(message);
+    } finally {
+      setIsApplyingExtraPicks(false);
+    }
   };
 
   const sanitizeFileName = (value: string) => {
@@ -468,6 +568,7 @@ const GeneratePage: React.FC = () => {
   };
 
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
+  const selectedExtraPickCount = selectedExtraPickIndices.length;
   const currentStickerCount = stickerSlots.length;
   const isMobile = isMobileDevice();
   const isAndroid = isAndroidDevice();
@@ -846,6 +947,104 @@ const GeneratePage: React.FC = () => {
                 </p>
               ) : null}
             </div>
+
+            {extraPickSlots.length > 0 ? (
+              <div className="mt-6 border-t border-slate-200 pt-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-900">Extra Picks</h3>
+                    <p className="text-sm text-slate-600">
+                      ตัวเลือกเพิ่มเติมจากรอบล่าสุด {extraPickSlots.length} รูป
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
+                    {isExtraPicksUnlocked ? 'Unlocked' : 'Locked'}
+                  </span>
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {extraPickSlots.map((slot) => {
+                    const selected = selectedExtraPickIndices.includes(slot.index);
+                    return (
+                      <button
+                        type="button"
+                        key={slot.id}
+                        onClick={() => {
+                          if (isExtraPicksUnlocked) {
+                            toggleExtraPickSelection(slot.index);
+                          }
+                        }}
+                        disabled={!isExtraPicksUnlocked || isApplyingExtraPicks}
+                        aria-pressed={selected}
+                        className={`relative overflow-hidden rounded-2xl border p-[3px] ${
+                          selected
+                            ? 'border-emerald-400 ring-2 ring-emerald-200'
+                            : 'border-slate-200'
+                        } ${!isExtraPicksUnlocked ? 'cursor-default' : ''}`}
+                      >
+                        {slot.url ? (
+                          <img
+                            src={slot.url}
+                            alt={`Extra pick for sticker ${slot.index + 1}`}
+                            className="aspect-square w-full rounded-xl bg-white object-contain"
+                          />
+                        ) : (
+                          <div className="flex aspect-square w-full items-center justify-center rounded-xl bg-slate-100 text-center text-sm font-medium text-slate-500">
+                            Unlock 1 Coin
+                          </div>
+                        )}
+                        <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
+                          Slot {slot.index + 1}
+                        </span>
+                        {selected ? (
+                          <span className="pointer-events-none absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/90 text-xs font-bold text-white shadow">
+                            ✓
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {!isExtraPicksUnlocked ? (
+                  <div className="mt-4 space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleUnlockExtraPicks}
+                      disabled={isUnlockingExtraPicks || (coinBalance ?? 0) < 1}
+                      className="focus-ring min-h-11 w-full rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-400"
+                    >
+                      {isUnlockingExtraPicks ? 'Unlocking...' : 'Unlock Extra Picks (1 Coin)'}
+                    </button>
+                    {(coinBalance ?? 0) < 1 ? (
+                      <p className="text-sm text-slate-600">Coins ไม่พอสำหรับปลดล็อก Extra Picks</p>
+                    ) : (
+                      <p className="text-sm text-slate-600">
+                        ปลดล็อกเพื่อดูรูปจริง แล้วเลือกเฉพาะรูปที่ต้องการสลับเข้า final 16
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4 space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleApplyExtraPicks}
+                      disabled={isApplyingExtraPicks || selectedExtraPickCount === 0}
+                      className="focus-ring min-h-11 w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                    >
+                      {isApplyingExtraPicks
+                        ? 'Applying...'
+                        : selectedExtraPickCount > 0
+                          ? `Apply Selected (${selectedExtraPickCount})`
+                          : 'Select Extra Picks to Apply'}
+                    </button>
+                    <p className="text-sm text-slate-600">
+                      เลือก Extra Picks ที่ต้องการ แล้วระบบจะสลับเข้า pack ตาม slot เดิม
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : null}
           </section>
         )}
 

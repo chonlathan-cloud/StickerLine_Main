@@ -23,6 +23,9 @@ API.interceptors.request.use((config) => {
   return config;
 });
 
+export type StickerSlotResponse = { index: number; url: string; locked: boolean };
+export type ExtraPickResponse = { index: number; url: string | null };
+
 //const API = axios.create({
 //  baseURL: (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080',
 //  headers: { 'Content-Type': 'application/json' },
@@ -114,8 +117,41 @@ export async function getCurrentStickers(userId: string) {
     status: 'ok' | 'empty';
     job_id?: string | null;
     sticker_count?: number;
-    result_slots?: Array<{ index: number; url: string; locked: boolean }>;
+    result_slots?: StickerSlotResponse[];
+    extra_pick_count?: number;
+    extra_picks_unlocked?: boolean;
+    extra_picks?: ExtraPickResponse[];
   }>(`/api/v1/jobs/current?user_id=${encodeURIComponent(userId)}`);
+  return data;
+}
+
+export async function unlockCurrentExtraPicks(userId: string) {
+  const { data } = await API.post<{
+    status: string;
+    job_id?: string | null;
+    coin_balance?: number;
+    sticker_count?: number;
+    result_slots?: StickerSlotResponse[];
+    extra_pick_count?: number;
+    extra_picks_unlocked?: boolean;
+    extra_picks?: ExtraPickResponse[];
+  }>('/api/v1/jobs/current/extra-picks/unlock', { user_id: userId });
+  return data;
+}
+
+export async function applyCurrentExtraPicks(userId: string, selectedIndices: number[]) {
+  const { data } = await API.post<{
+    status: string;
+    job_id?: string | null;
+    sticker_count?: number;
+    result_slots?: StickerSlotResponse[];
+    extra_pick_count?: number;
+    extra_picks_unlocked?: boolean;
+    extra_picks?: ExtraPickResponse[];
+  }>('/api/v1/jobs/current/extra-picks/apply', {
+    user_id: userId,
+    selected_indices: selectedIndices,
+  });
   return data;
 }
 

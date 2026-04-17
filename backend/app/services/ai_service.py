@@ -32,7 +32,9 @@ class AIService:
         "16 distinct poses, consistent character design, center-aligned characters, LINE sticker compliant style, "
         "safe margin in every cell, 2K generation quality. "
         "Add clear #00FF00 gutters between cells (12–16px). No elements may cross cell boundaries. "
-        "Each sticker must be fully contained inside its own cell."
+        "Each sticker must be fully contained inside its own cell. "
+        "Keep camera distance and subject scale consistent across all 16 cells. "
+        "Each character should occupy roughly the same visual height in every cell, around 70-78% of the cell height."
     )
     DEFAULT_THAI_CAPTIONS = [
         "สวัสดี",
@@ -193,6 +195,7 @@ class AIService:
         image_uri: str,
         style_id: str,
         extra_prompt: Optional[str],
+        strict_cell_framing: bool = False,
     ) -> bytes:
         """
         Calls Vertex AI Gemini model to generate a sticker grid.
@@ -202,6 +205,18 @@ class AIService:
             style_prompt = self._resolve_style_prompt(style_id)
             text_instruction = self._build_text_instruction(extra_prompt)
             user_direction = self._build_user_direction_instruction(extra_prompt)
+            framing_retry_instruction = (
+                "FRAMING RETRY RULES (CRITICAL):\n"
+                "- Output exactly 16 stickers arranged in a strict 4 columns x 4 rows grid. Do not produce 15 stickers, 5x3, or any other layout.\n"
+                "- Keep every prop, limb, caption, and accessory fully inside its own cell with extra margin.\n"
+                "- Reserve at least 10% empty space from every cell edge; do not let any object or text touch the boundary.\n"
+                "- Maintain the same camera distance and same subject size across all cells; do not mix close-up stickers with full-body stickers.\n"
+                "- Keep each character at a consistent scale, targeting about 72-76% of the cell height.\n"
+                "- Hanging props near the top, wide props near the sides, and Thai captions near the bottom must stay comfortably inside the safe area.\n"
+                "- If a composition feels tight, make the character and props slightly smaller rather than filling the cell.\n"
+                if strict_cell_framing
+                else ""
+            )
 
             full_prompt = (
                 f"{self.TECHNICAL_TOKENS}\n"
@@ -209,6 +224,7 @@ class AIService:
                 f"{style_prompt}\n"
                 f"{text_instruction}\n"
                 f"{user_direction}\n"
+                f"{framing_retry_instruction}\n"
                 "Subject Identity Rule: maintain recognizable facial identity from the uploaded photo.\n"
                 "Character should be positioned clearly in each grid cell."
             ).strip()

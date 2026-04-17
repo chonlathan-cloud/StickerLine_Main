@@ -22,3 +22,7 @@ class UserInDB(UserBase):
     current_stickers: Optional[List[Dict]] = None
     current_stickers_job_id: Optional[str] = None
     current_stickers_updated_at: Optional[datetime] = None
+    current_extra_picks: Optional[List[Dict]] = None
+    current_extra_picks_job_id: Optional[str] = None
+    current_extra_picks_unlocked: bool = False
+    current_extra_picks_updated_at: Optional[datetime] = None
