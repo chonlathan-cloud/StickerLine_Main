@@ -10,6 +10,9 @@ type ProcessingStep = 'idle' | 'analyzing' | 'generating' | 'removing' | 'comple
 
 const DEFAULT_STICKER_COUNT = 16;
 const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
+const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
+const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
+const DOWNLOAD_DELAY_MS = 180;
 
 interface StickerSlot {
   id: string;
@@ -287,12 +290,39 @@ const GeneratePage: React.FC = () => {
     return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
   };
 
+  const isAndroidDevice = () => /Android/i.test(navigator.userAgent || '');
+
   const isMobileDevice = () => {
     const ua = navigator.userAgent || '';
     return /Android|webOS|iPhone|iPad|iPod/i.test(ua) || (navigator.maxTouchPoints ?? 0) > 1;
   };
 
-  const supportsFileShare = () => typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const isLiffInClient = () => {
+    const liffSdk = (window as any).liff;
+    return Boolean(liffSdk?.isInClient?.());
+  };
+
+  const supportsFileShare = () =>
+    typeof navigator !== 'undefined' &&
+    typeof navigator.share === 'function' &&
+    typeof File !== 'undefined';
+
+  const shouldContinueSaveToPhotosInExternalBrowser = () => {
+    const currentUrl = new URL(window.location.href);
+    return currentUrl.searchParams.get(SAVE_TO_PHOTOS_PARAM) === SAVE_TO_PHOTOS_PARAM_VALUE;
+  };
+
+  const clearSaveToPhotosIntent = () => {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.delete(SAVE_TO_PHOTOS_PARAM);
+    window.history.replaceState({}, document.title, currentUrl.toString());
+  };
+
+  const buildExternalBrowserSaveToPhotosUrl = () => {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.set(SAVE_TO_PHOTOS_PARAM, SAVE_TO_PHOTOS_PARAM_VALUE);
+    return currentUrl.toString();
+  };
 
   const openDownloadUrl = (url: string) => {
     const liffSdk = (window as any).liff;
@@ -313,6 +343,88 @@ const GeneratePage: React.FC = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const triggerBlobDownload = (blob: Blob, fileName: string) => {
+    const objectUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
+  };
+
+  const downloadStickerPngs = async (stickers: Array<{ blob: Blob; fileName: string }>) => {
+    for (const sticker of stickers) {
+      triggerBlobDownload(sticker.blob, sticker.fileName);
+      await new Promise((resolve) => window.setTimeout(resolve, DOWNLOAD_DELAY_MS));
+    }
+  };
+
+  const continueSaveToPhotos = async (userId: string) => {
+    let stickers: Array<{ blob: Blob; fileName: string }> = [];
+
+    try {
+      setIsSharingToPhotos(true);
+      setError(null);
+
+      stickers = await Promise.all(
+        stickerSlots.map(async (_slot, index) => {
+          const blob = await downloadCurrentStickerForShare(userId, index);
+          const fileName = `sticker-${String(index + 1).padStart(2, '0')}.png`;
+          return {
+            blob,
+            fileName,
+          };
+        }),
+      );
+
+      if (supportsFileShare()) {
+        const files = stickers.map(
+          (sticker) => new File([sticker.blob], sticker.fileName, { type: sticker.blob.type || 'image/png' }),
+        );
+        const canShareFiles =
+          typeof navigator.canShare === 'function' ? navigator.canShare({ files }) : true;
+
+        if (canShareFiles) {
+          await navigator.share({
+            title: 'LINE Sticker PNG Set',
+            files,
+          });
+          return;
+        }
+      }
+
+      if (!supportsFileShare() && !isAndroidDevice()) {
+        setError('อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน');
+        return;
+      }
+
+      await downloadStickerPngs(stickers);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return;
+      }
+
+      const message = err?.response?.data?.detail || err?.message || 'Save to Photos failed.';
+      const isSharePermissionDenied =
+        err?.name === 'NotAllowedError' || /permission denied|notallowederror/i.test(message);
+
+      if (isAndroidDevice() && stickers.length > 0 && isSharePermissionDenied) {
+        await downloadStickerPngs(stickers);
+        return;
+      }
+
+      setError(
+        /fetch|load failed|networkerror|prepare sticker/i.test(message)
+          ? 'ไม่สามารถเตรียมไฟล์ PNG สำหรับ Save to Photos ได้ กรุณาลองใหม่อีกครั้ง'
+          : message,
+      );
+    } finally {
+      setIsSharingToPhotos(false);
+    }
   };
 
   const handleDownload = async () => {
@@ -343,54 +455,24 @@ const GeneratePage: React.FC = () => {
       return;
     }
 
-    if (!supportsFileShare()) {
-      setError('อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน');
+    if (isAndroidDevice() && isLiffInClient()) {
+      openDownloadUrl(buildExternalBrowserSaveToPhotosUrl());
       return;
     }
 
-    try {
-      setIsSharingToPhotos(true);
-      setError(null);
-
-      const files = await Promise.all(
-        stickerSlots.map(async (_slot, index) => {
-          const blob = await downloadCurrentStickerForShare(profile.userId, index);
-          return new File(
-            [blob],
-            `sticker-${String(index + 1).padStart(2, '0')}.png`,
-            { type: blob.type || 'image/png' },
-          );
-        })
-      );
-
-      if (typeof navigator.canShare === 'function' && !navigator.canShare({ files })) {
-        setError('อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน');
-        return;
-      }
-
-      await navigator.share({
-        title: 'LINE Sticker PNG Set',
-        files,
-      });
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        return;
-      }
-
-      const message = err?.response?.data?.detail || err?.message || 'Save to Photos failed.';
-      setError(
-        /fetch|load failed|networkerror|prepare sticker/i.test(message)
-          ? 'ไม่สามารถเตรียมไฟล์ PNG สำหรับ Save to Photos ได้ กรุณาลอง Download ZIP แทน'
-          : message
-      );
-    } finally {
-      setIsSharingToPhotos(false);
+    if (shouldContinueSaveToPhotosInExternalBrowser()) {
+      clearSaveToPhotosIntent();
     }
+
+    await continueSaveToPhotos(profile.userId);
   };
 
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
   const currentStickerCount = stickerSlots.length;
   const isMobile = isMobileDevice();
+  const isAndroid = isAndroidDevice();
+  const isInLiffClient = isLiffInClient();
+  const shouldResumeSaveToPhotos = shouldContinueSaveToPhotosInExternalBrowser() && !isInLiffClient;
   const unlockedCount = currentStickerCount > 0 ? currentStickerCount - lockedCount : DEFAULT_STICKER_COUNT;
   const generateButtonLabel = loading
     ? 'Generating...'
@@ -746,7 +828,19 @@ const GeneratePage: React.FC = () => {
                 {isDownloading ? 'Preparing ZIP...' : 'Download ZIP'}
               </button>
 
-              {isMobile && !supportsFileShare() ? (
+              {isMobile && isAndroid && isInLiffClient ? (
+                <p className="text-sm text-slate-600">
+                  บน Android ใน LINE ระบบจะเปิดเบราว์เซอร์ภายนอกให้ก่อน แล้วค่อยบันทึกรูปจากที่นั่น
+                </p>
+              ) : null}
+
+              {isMobile && shouldResumeSaveToPhotos ? (
+                <p className="text-sm text-slate-600">
+                  ตอนนี้เปิดในเบราว์เซอร์ภายนอกแล้ว กด Save to Photos อีกครั้งเพื่อแชร์หรือดาวน์โหลด PNG
+                </p>
+              ) : null}
+
+              {isMobile && !isAndroid && !supportsFileShare() ? (
                 <p className="text-sm text-slate-600">
                   อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน
                 </p>
