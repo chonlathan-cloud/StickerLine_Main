@@ -1,0 +1,309 @@
+import logging
+from typing import Optional, Tuple, List
+from datetime import datetime, timezone
+from google.cloud import firestore
+from app.utils.firestore import get_db
+from app.models.user import UserCreate, UserInDB
+
+logger = logging.getLogger(__name__)
+
+class InsufficientCoinsError(Exception):
+    pass
+
+class UserService:
+    # Class-level mock storage for "Guest" mode persistence during process life
+    _MOCK_STORAGE = {}
+
+    def __init__(self):
+        try:
+            self.db = get_db()
+            self.users_collection = self.db.collection('users')
+            self.use_mock = False
+        except Exception as e:
+            logger.warning(f"Firestore not available, falling back to in-memory mock storage: {e}")
+            self.use_mock = True
+            self.db = None
+            self.users_collection = None
+
+    async def sync_user(self, line_profile: UserCreate) -> dict:
+        """
+        Check if user exists. If not, create new user with 2 free coins.
+        If exists, update info and return.
+        """
+        if self.use_mock:
+            user_id = line_profile.line_id
+            if user_id not in self._MOCK_STORAGE:
+                self._MOCK_STORAGE[user_id] = {
+                    "line_id": user_id,
+                    "display_name": line_profile.display_name,
+                    "picture_url": line_profile.picture_url,
+                    "coin_balance": 100, # Give more coins for local dev
+                    "total_spent_thb": 0.0,
+                    "is_free_trial_used": True,
+                    "current_stickers": [],
+                    "current_stickers_job_id": None,
+                    "current_stickers_updated_at": None,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                logger.info(f"MOCK: Created new guest user: {user_id}")
+            else:
+                self._MOCK_STORAGE[user_id].update({
+                    "display_name": line_profile.display_name,
+                    "picture_url": line_profile.picture_url,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                })
+                logger.info(f"MOCK: Updated guest user: {user_id}")
+            return self._MOCK_STORAGE[user_id]
+
+        user_ref = self.users_collection.document(line_profile.line_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            # Create new user based on Business Rules (Grant 2 Free Coins)
+            new_user = UserInDB(
+                line_id=line_profile.line_id,
+                display_name=line_profile.display_name,
+                picture_url=line_profile.picture_url,
+                coin_balance=2,
+                total_spent_thb=0.0,
+                is_free_trial_used=True,
+                current_stickers=[],
+                current_stickers_job_id=None,
+                current_stickers_updated_at=None,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc)
+            )
+            user_data = new_user.model_dump()
+            await user_ref.set(user_data)
+            logger.info(f"Created new user: {line_profile.line_id}")
+            return user_data
+        else:
+            # Update existing user info asynchronously
+            update_data = {
+                "display_name": line_profile.display_name,
+                "picture_url": line_profile.picture_url,
+                "updated_at": datetime.now(timezone.utc)
+            }
+            await user_ref.update(update_data)
+            
+            user_data = user_doc.to_dict()
+            # Merge updated fields for immediate response reflection
+            user_data.update(update_data)
+            logger.info(f"Updated existing user: {line_profile.line_id}")
+            return user_data
+
+    async def get_current_stickers(self, user_id: str) -> Tuple[List[dict], Optional[str]]:
+        """
+        Fetch the user's current sticker set and associated job ID.
+        Returns (slots, job_id). Slots may be empty if none exist.
+        """
+        if self.use_mock:
+            data = self._MOCK_STORAGE.get(user_id) or {}
+            slots = data.get("current_stickers") or []
+            job_id = data.get("current_stickers_job_id")
+            return slots, job_id
+
+        user_ref = self.users_collection.document(user_id)
+        snapshot = await user_ref.get()
+        if not snapshot.exists:
+            raise ValueError(f"User {user_id} not found")
+
+        data = snapshot.to_dict() or {}
+        slots = data.get("current_stickers") or []
+        job_id = data.get("current_stickers_job_id")
+        return slots, job_id
+
+    async def set_current_stickers(self, user_id: str, slots: List[dict], job_id: Optional[str]) -> None:
+        """
+        Persist the user's current sticker set in Firestore.
+        """
+        if self.use_mock:
+            if user_id in self._MOCK_STORAGE:
+                self._MOCK_STORAGE[user_id].update({
+                    "current_stickers": slots,
+                    "current_stickers_job_id": job_id,
+                    "current_stickers_updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+            return
+
+        user_ref = self.users_collection.document(user_id)
+        await user_ref.update({
+            "current_stickers": slots,
+            "current_stickers_job_id": job_id,
+            "current_stickers_updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        })
+
+    async def reset_current_stickers(self, user_id: str) -> None:
+        """
+        Clear the current sticker set when a new source image is uploaded.
+        """
+        await self.set_current_stickers(user_id, [], None)
+
+    async def get_display_name(self, user_id: str) -> Optional[str]:
+        if self.use_mock:
+            return self._MOCK_STORAGE.get(user_id, {}).get("display_name")
+
+        user_ref = self.users_collection.document(user_id)
+        snapshot = await user_ref.get()
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict() or {}
+        display_name = data.get("display_name")
+        if isinstance(display_name, str) and display_name.strip():
+            return display_name.strip()
+        return None
+
+    async def deduct_coin(self, user_id: str, amount: int = 1) -> int:
+        """
+        Deduct coin from user using atomic transaction to prevent race conditions.
+        """
+        if self.use_mock:
+            data = self._MOCK_STORAGE.get(user_id)
+            if not data:
+                raise ValueError(f"User {user_id} not found")
+            balance = data.get("coin_balance", 0)
+            if balance < amount:
+                raise InsufficientCoinsError(f"Not enough coins. Balance: {balance}, Required: {amount}")
+            new_balance = balance - amount
+            data["coin_balance"] = new_balance
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return new_balance
+
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+
+        @firestore.async_transactional
+        async def atomic_deduct(transaction, user_ref, amount):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+            
+            balance = snapshot.get("coin_balance")
+            if balance < amount:
+                raise InsufficientCoinsError(f"Not enough coins. Balance: {balance}, Required: {amount}")
+            
+            new_balance = balance - amount
+            transaction.update(user_ref, {
+                "coin_balance": new_balance,
+                "updated_at": datetime.now(timezone.utc)
+            })
+            return new_balance
+
+        try:
+            new_balance = await atomic_deduct(transaction, user_ref, amount)
+            logger.info(f"Deducted {amount} coins from {user_id}. New balance: {new_balance}")
+            return new_balance
+        except Exception as e:
+            logger.error(f"Failed to deduct coin for {user_id}: {e}")
+            raise
+    
+    async def refund_coin(self, user_id: str, amount: int = 1) -> int:
+        """
+        Refund coin to user using atomic transaction to prevent race conditions.
+        Used as a rollback mechanism when generation fails.
+        """
+        if self.use_mock:
+            data = self._MOCK_STORAGE.get(user_id)
+            if not data:
+                return 0
+            new_balance = data.get("coin_balance", 0) + amount
+            data["coin_balance"] = new_balance
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return new_balance
+
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+
+        @firestore.async_transactional
+        async def atomic_refund(transaction, user_ref, amount):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+            
+            balance = snapshot.get("coin_balance")
+            new_balance = balance + amount
+            transaction.update(user_ref, {
+                "coin_balance": new_balance,
+                "updated_at": datetime.now(timezone.utc)
+            })
+            return new_balance
+
+        try:
+            new_balance = await atomic_refund(transaction, user_ref, amount)
+            logger.info(f"Refunded {amount} coins to {user_id}. New balance: {new_balance}")
+            return new_balance
+        except Exception as e:
+            logger.error(f"Failed to refund coin for {user_id}: {e}")
+            raise
+
+    async def top_up_coin(self, user_id: str, coins: int, thb_amount: float, reference_id: str) -> dict:
+        """
+        Top up coins and total spent THB using an atomic transaction.
+        Also logs the transaction in the 'transactions' collection.
+        """
+        if self.use_mock:
+            data = self._MOCK_STORAGE.get(user_id)
+            if not data:
+                raise ValueError(f"User {user_id} not found")
+            new_coins = data.get("coin_balance", 0) + coins
+            new_spent = data.get("total_spent_thb", 0.0) + thb_amount
+            data.update({
+                "coin_balance": new_coins,
+                "total_spent_thb": new_spent,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
+            return {"coin_balance": new_coins, "total_spent_thb": new_spent}
+
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+        
+        # Auto-generate a transaction ID
+        txn_ref = self.db.collection('transactions').document()
+
+        @firestore.async_transactional
+        async def atomic_top_up(transaction, user_ref, txn_ref, coins, thb_amount, reference_id):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+            
+            # Update user balances
+            data = snapshot.to_dict() or {}
+            current_coins = data.get("coin_balance", 0)
+            current_spent = data.get("total_spent_thb", 0.0)
+            
+            new_coins = current_coins + coins
+            new_spent = current_spent + thb_amount
+            
+            now_utc = datetime.now(timezone.utc)
+            
+            transaction.update(user_ref, {
+                "coin_balance": new_coins,
+                "total_spent_thb": new_spent,
+                "updated_at": now_utc
+            })
+            
+            # Log the transaction
+            transaction.set(txn_ref, {
+                "txn_id": txn_ref.id,
+                "user_id": user_id,
+                "type": "topup",
+                "amount": coins,
+                "reference_id": reference_id,
+                "timestamp": now_utc
+            })
+            
+            return {
+                "coin_balance": new_coins,
+                "total_spent_thb": new_spent
+            }
+
+        try:
+            result = await atomic_top_up(transaction, user_ref, txn_ref, coins, thb_amount, reference_id)
+            logger.info(f"Top-up successful for {user_id}. Added {coins} coins for {thb_amount} THB.")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to top up coin for {user_id}: {e}")
+            raise

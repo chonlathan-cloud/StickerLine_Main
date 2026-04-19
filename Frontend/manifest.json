@@ -1,0 +1,25 @@
+
+{
+  "name": "Sticker Line Studio",
+  "short_name": "StickerStudio",
+  "description": "Professional-grade sticker generator for LINE and messaging apps.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#6366f1",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj48cmVjdCB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgcng9IjEyOCIgZmlsbD0iIzYzNjZmMSIvPjxwYXRoIGQ9Ik0yNTYgODBDMTU4LjggODAgODAgMTU4LjggODAgMjU2czc4LjggMTc2IDE3NiAxNzYgMTc2LTc4LjggMTc2LTE3NlMzNTMuMiA4MCAyNTYgODBaIiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxNCIvPjxwYXRoIGQ9Ik0yNTYgMTAwQzE3MC40IDEwMCAxMDAgMTcwLjQgMTAwIDI1NnM3MC40IDE1NiAxNTYgMTU2IDE1Ni03MC40IDE1Ni0xNTYtNzAuNC0xNTYtMTU2LTE1NloiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzYzNjZmMSIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWRhc2hhcnJheT0iMjAgMTAiLz48Y2lyY2xlIGN4PSIxODAiIGN5PSIyMzAiIHI9IjI1IiBmaWxsPSIjNjM2NmYxIi8+PGNpcmNsZSBjeD0iMzMyIiBjeT0iMjMwbiByPSIyNSIgZmlsbD0iIzYzNjZmMSIvPjxwYXRoIGQ9Ik0xODAgMzEwYzAgMCA0MCA2MCA3NiA2MHM3Ni02MCA3Ni02MCIgc3Ryb2tlPSIjNjM2NmYxIiBzdHJva2Utd2lkdGg9IjE1IiBzdHJva2UtbGluZWNhcD0icm91bmQiIGZpbGw9Im5vbmUiLz48L3N2Zz4=",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTkyIj48cmVjdCB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgcng9IjQ4IiBmaWxsPSIjNjM2NmYxIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSI5NiIgcj0iNjAiIGZpbGw9IndoaXRlIi8+PGNpcmNsZSBjeD0iNzAiIGN5PSI4NSIgcj0iOCIgZmlsbD0iIzYzNjZmMSIvPjxjaXJjbGUgY3g9IjEyMiIgY3k9Ijg1IiByPSI4IiBmaWxsPSIjNjM2NmYxIi8+PHBhdGggZD0iTTcwIDExNWMwIDAgMTUgMTggMjYgMThzMjYtMTggMjYtMTgiIHN0cm9rZT0iIzYzNjZmMSIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWNhcD0icm91bmQiIGZpbGw9Im5vbmUiLz48L3N2Zz4=",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
