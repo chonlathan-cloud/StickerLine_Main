@@ -1,19 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ExtraPickResponse, StickerSlotResponse } from '../api/client';
 import { StickerStyle, StickerSheetConfig } from '../types';
-import {
-  applyCurrentExtraPicks,
-  downloadCurrentStickerForShare,
-  ExtraPickResponse,
-  getCurrentStickersDownloadUrl,
-  getCurrentStickers,
-  resetCurrentStickers,
-  StickerSlotResponse,
-  unlockCurrentExtraPicks,
-  uploadImage,
-  startGeneration,
-  checkJobStatus,
-} from '../api/client';
+import { downloadCurrentStickerForShare, getCurrentStickersDownloadUrl, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
 import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
@@ -21,7 +10,7 @@ import { useAuth } from '../providers/AuthProvider';
 type ProcessingStep = 'idle' | 'analyzing' | 'generating' | 'removing' | 'complete';
 
 const DEFAULT_STICKER_COUNT = 16;
-const ALLOWED_STICKER_COUNTS = new Set([16]);
+const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
 const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
 const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
 const DOWNLOAD_DELAY_MS = 180;
@@ -31,7 +20,6 @@ interface StickerSlot {
   url: string;
   locked: boolean;
 }
-
 interface ExtraPickSlot {
   id: string;
   index: number;
@@ -105,7 +93,6 @@ const GeneratePage: React.FC = () => {
   // Backend-driven: no local AI/image-processing refs needed
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resultRef = useRef<HTMLElement>(null);
-
   const hydrateCurrentGeneration = (data: CurrentGenerationPayload) => {
     const now = Date.now();
     const resultSlots = data.result_slots ?? [];
@@ -178,7 +165,20 @@ const GeneratePage: React.FC = () => {
       if (!profile?.userId) return;
       try {
         const data = await getCurrentStickers(profile.userId);
-        hydrateCurrentGeneration(data);
+        const slotCount = data.result_slots?.length ?? 0;
+        if (data.status === 'ok' && data.result_slots && isSupportedStickerCount(slotCount)) {
+          const now = Date.now();
+          const slots = data.result_slots.map((slot, index) => ({
+            id: `${data.job_id ?? now}-${index}`,
+            url: slot.url,
+            locked: slot.locked,
+          }));
+          setStickerSlots(slots);
+          setTransparentImageUrl(slots[0]?.url ?? null);
+          setHasGenerated(true);
+          setJobId(data.job_id ?? null);
+          setGenerationTargetCount(slotCount);
+        }
       } catch {
         // Non-blocking: ignore load failures for current set
       }
@@ -258,7 +258,7 @@ const GeneratePage: React.FC = () => {
       const maxAttempts = 180;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const statusResp = await checkJobStatus(jobId);
-        if (statusResp.status === 'completed') {
+        if (statusResp.status === 'completed' && statusResp.result_slots) {
           return statusResp;
         }
         if (statusResp.status === 'failed') {
@@ -287,15 +287,19 @@ const GeneratePage: React.FC = () => {
       if (jobResp.status !== 'completed' && jobResp.job_id) {
         resolved = await pollUntilComplete(jobResp.job_id);
       }
+      const resultCount = resolved.result_slots?.length ?? 0;
+      if (resolved.status === 'completed' && resolved.result_slots && isSupportedStickerCount(resultCount)) {
+        const now = Date.now();
+        const slots = resolved.result_slots.map((slot, index) => ({
+          id: `${resolved.job_id ?? now}-${index}`,
+          url: slot.url,
+          locked: slot.locked,
+        }));
 
-      if (resolved.status === 'completed') {
-        const currentData = await getCurrentStickers(profile.userId);
-        const resultCount = currentData.result_slots?.length ?? 0;
-        if (!isSupportedStickerCount(resultCount)) {
-          throw new Error('Generation finished but the current sticker set is incomplete.');
-        }
-
-        hydrateCurrentGeneration(currentData);
+        setStickerSlots(slots);
+        setJobId(resolved.job_id || null);
+        setTransparentImageUrl(slots[0]?.url ?? null);
+        setHasGenerated(true);
         finalStickerCount = resultCount;
         setGenerationTargetCount(resultCount);
         setProcessingStep('complete');
@@ -311,7 +315,11 @@ const GeneratePage: React.FC = () => {
         throw new Error('Generation failed or returned unexpected status.');
       }
     } catch (err: any) {
-      const message = err?.response?.data?.detail || err.message || 'Error connecting to server';
+      console.error('Generation Error:', err);
+      const backendDetail = err?.response?.data?.detail;
+      const message = typeof backendDetail === 'string' 
+        ? backendDetail 
+        : (backendDetail ? JSON.stringify(backendDetail) : (err.response?.data ? JSON.stringify(err.response.data) : err.message || 'Error connecting to server'));
       setError(message);
     } finally {
       setLoading(false);
@@ -613,16 +621,25 @@ const GeneratePage: React.FC = () => {
   return (
     <PageLayout isOnline={isOnline}>
       <main id="main-content" className="mx-auto flex w-full max-w-md flex-col gap-3 px-4 pb-6 pt-3 sm:max-w-xl" aria-busy={loading}>
-        <section className="flex flex-wrap items-center justify-between gap-3 rounded-[2.5rem] border border-slate-200 bg-white p-5 shadow-sm">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Your Balance</p>
-            <p className="mt-1 text-2xl font-semibold text-slate-900">
-              {coinBalance ?? 0} Coins
-            </p>
+        <section className="flex flex-wrap items-center justify-between gap-4 rounded-[3.5rem] border border-slate-100 border-b-[6px] border-b-slate-200/50 bg-white px-10 py-8 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.08)]">
+          <div className="flex flex-col gap-2">
+            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-slate-400">Your Balance</p>
+            <div className="flex items-center gap-3">
+              {/* Detailed 3D Coin Icon */}
+              <div className="relative flex h-12 w-12 items-center justify-center shrink-0">
+                <div className="absolute inset-0 rounded-full bg-[#fbc02d] shadow-md" />
+                <div className="absolute inset-[3px] rounded-full bg-gradient-to-b from-[#ffeb3b] to-[#f9a825] shadow-[inset_0_2px_4px_rgba(255,255,255,0.6)]" />
+                <div className="absolute inset-[18%] rounded-full border-2 border-[#fbc02d]/20" />
+                <span className="relative z-10 text-2xl font-black text-[#9a7b0c] drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]">C</span>
+              </div>
+              <p className="text-3xl font-extrabold tracking-tight text-slate-800">
+                {(coinBalance ?? 0).toLocaleString()} <span className="text-xl font-bold text-slate-800">Coins</span>
+              </p>
+            </div>
           </div>
           <Link
             to="/payment"
-            className="focus-ring min-h-11 rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+            className="focus-ring flex min-h-16 items-center rounded-full bg-[#10b981] px-10 py-2 text-xl font-bold text-white shadow-[0_10px_25px_-5px_rgba(16,185,129,0.4)] transition-all hover:bg-[#059669] active:scale-95"
           >
             เติมเงิน
           </Link>
@@ -732,96 +749,130 @@ const GeneratePage: React.FC = () => {
 
         </section>
 
-        <section className="rounded-[2.5rem] border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="sr-only">Controls</h2>
-
-          <fieldset className="mt-2">
-            <legend className="text-xl font-bold tracking-tight text-slate-900">Style</legend>
-            <div className="mt-2 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              {STYLE_OPTIONS.map((styleOption) => {
-                const selected = config.style === styleOption.value;
-                return (
-                  <label
-                    key={styleOption.value}
-                    className={`rounded-2xl border px-3 py-2.5 ${selected
-                      ? 'border-indigo-700 bg-indigo-50 text-slate-900 ring-2 ring-indigo-100'
-                      : 'border-slate-300 bg-white text-slate-800 hover:border-indigo-300'
-                      } flex cursor-pointer items-center gap-3`}
-                  >
-                    <input
-                      type="radio"
-                      name="sticker-style"
-                      value={styleOption.value}
-                      checked={selected}
-                      onChange={() => setConfig((prev) => ({ ...prev, style: styleOption.value }))}
-                      className="focus-ring h-4 w-4 border-slate-400 text-indigo-600"
-                    />
-                    <span
-                      className={`relative flex h-14 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl ${selected ? 'bg-indigo-50' : 'bg-slate-50'
+        <section className="relative rounded-[2.5rem] border border-slate-100 bg-white p-7 shadow-[0_15px_40px_rgba(0,0,0,0.04)]">
+          <div className="space-y-6">
+            <fieldset>
+              <legend className="text-2xl font-black tracking-tight text-slate-800">Style</legend>
+              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {STYLE_OPTIONS.map((styleOption) => {
+                  const selected = config.style === styleOption.value;
+                  return (
+                    <label
+                      key={styleOption.value}
+                      className={`relative flex cursor-pointer items-center gap-4 overflow-hidden rounded-[1.5rem] border-2 p-3 transition-all duration-300 ${selected
+                        ? 'border-indigo-400 bg-indigo-50/30 shadow-[0_0_20px_rgba(99,102,241,0.15)]'
+                        : 'border-slate-100 bg-white hover:border-slate-200 shadow-sm'
                         }`}
                     >
-                      <img
-                        src={styleOption.previewSrc}
-                        alt={`${styleOption.label} style preview`}
-                        className="h-full w-full object-contain"
-                        loading="lazy"
+                      {/* Active State Glass Effect + Sparkles */}
+                      {selected && (
+                        <>
+                          <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/10 via-purple-500/10 to-pink-500/10 backdrop-blur-[2px]" />
+                          <svg className="absolute inset-0 h-full w-full opacity-40 pointer-events-none" viewBox="0 0 100 100">
+                            <circle cx="20" cy="30" r="0.8" fill="white" className="animate-pulse" />
+                            <circle cx="75" cy="65" r="1.2" fill="white" className="animate-pulse" style={{ animationDelay: '0.5s' }} />
+                            <circle cx="40" cy="85" r="0.8" fill="white" className="animate-pulse" style={{ animationDelay: '1s' }} />
+                            <circle cx="85" cy="15" r="1.0" fill="white" className="animate-pulse" style={{ animationDelay: '0.2s' }} />
+                          </svg>
+                        </>
+                      )}
+
+                      <div className={`relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${selected ? 'border-indigo-500 bg-indigo-500' : 'border-slate-200'
+                        }`}>
+                        {selected && <div className="h-2 w-2 rounded-full bg-white shadow-[0_0_8px_white]" />}
+                      </div>
+
+                      <div className={`relative z-10 flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-100 shadow-inner transition-transform duration-500 ${selected ? 'scale-110' : ''}`}>
+                        <img
+                          src={styleOption.previewSrc}
+                          alt={styleOption.label}
+                          className="h-full w-full object-contain"
+                        />
+                      </div>
+
+                      <div className="relative z-10 min-w-0">
+                        <span className="block text-lg font-black leading-none text-slate-800">{styleOption.label}</span>
+                        <span className="mt-1 block text-sm font-bold text-slate-600/80">{styleOption.title}</span>
+                        <span className="mt-0.5 block text-xs font-medium text-slate-400">{styleOption.hint}</span>
+                      </div>
+
+                      <input
+                        type="radio"
+                        name="sticker-style"
+                        value={styleOption.value}
+                        checked={selected}
+                        onChange={() => setConfig((prev) => ({ ...prev, style: styleOption.value }))}
+                        className="sr-only"
                       />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-[1.15rem] font-semibold leading-none">{styleOption.label}</span>
-                      <span className="mt-0.5 block text-[0.95rem] font-medium leading-tight text-slate-700">{styleOption.title}</span>
-                      <span className="mt-0.5 block text-[0.9rem] leading-tight text-slate-500">{styleOption.hint}</span>
-                    </span>
-                  </label>
-                );
-              })}
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+
+            <div className="space-y-4">
+              <h3 className="text-xl font-black tracking-tight text-slate-800">Concept</h3>
+              <div className="overflow-hidden rounded-[2rem] bg-slate-50/50 p-4 ring-1 ring-slate-100">
+                <div className="relative flex items-start gap-3">
+                  <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-50 shadow-sm ring-1 ring-blue-100">
+                    <svg className="h-5 w-5 fill-blue-500 text-blue-500 drop-shadow-[0_0_8px_rgba(59,130,246,0.6)]" viewBox="0 0 24 24">
+                      <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" />
+                    </svg>
+                  </div>
+                  <textarea
+                    id="prompt-details"
+                    value={config.extraPrompt}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, extraPrompt: e.target.value }))}
+                    placeholder="Describe your image..."
+                    rows={2}
+                    className="w-full resize-none bg-transparent py-1 text-base font-medium text-slate-700 placeholder:text-slate-400 focus:outline-none"
+                  />
+                </div>
+                <div className="mt-3 border-t border-slate-200/50 pt-3">
+                  <p className="text-xs font-semibold text-slate-400">
+                    e.g. "A boy wearing hoodie in cyberpunk city"
+                  </p>
+                </div>
+              </div>
             </div>
-          </fieldset>
 
-          <div className="mt-2.5">
-            <label htmlFor="prompt-details" className="sr-only">
-              Prompt details
-            </label>
-            <textarea
-              id="prompt-details"
-              value={config.extraPrompt}
-              onChange={(e) => setConfig((prev) => ({ ...prev, extraPrompt: e.target.value }))}
-              onFocus={() => setIsPromptExpanded(true)}
-              onBlur={() => {
-                if (!config.extraPrompt.trim()) setIsPromptExpanded(false);
-              }}
-              rows={isPromptExpanded ? 5 : 1}
-              className={`focus-ring w-full resize-none rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 transition-[height] ${isPromptExpanded ? 'min-h-32' : 'h-12'
-                }`}
-              placeholder="prompt detail"
-              aria-label="Prompt details"
-            />
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={generateSheet}
+                disabled={
+                  loading
+                  || !config.base64Image
+                  || !isOnline
+                  || (hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount)
+                }
+                className="relative h-16 w-full overflow-hidden rounded-full font-black text-white shadow-2xl transition-all hover:scale-[1.01] hover:shadow-indigo-500/25 active:scale-95 disabled:grayscale disabled:opacity-50"
+              >
+                {/* Vibrant Gradient Background */}
+                <div className="absolute inset-0 bg-gradient-to-r from-blue-400 via-indigo-500 to-purple-600 animate-gradient-x" />
+                
+                {/* Particle Overlay */}
+                <svg className="absolute inset-0 h-full w-full opacity-30" viewBox="0 0 100 100">
+                  <circle cx="10" cy="20" r="1" fill="white" className="animate-pulse" />
+                  <circle cx="90" cy="50" r="0.8" fill="white" className="animate-pulse" />
+                  <circle cx="30" cy="80" r="1.2" fill="white" className="animate-pulse" />
+                  <circle cx="60" cy="20" r="0.5" fill="white" className="animate-pulse" />
+                </svg>
+
+                <span className="relative z-10 flex items-center justify-center gap-2 text-xl tracking-wide">
+                  {loading && <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />}
+                  {generateButtonLabel}
+                </span>
+              </button>
+            </div>
           </div>
-
-          <div className="mt-4 space-y-2">
-            <button
-              type="button"
-              onClick={generateSheet}
-              disabled={
-                loading
-                || !config.base64Image
-                || !isOnline
-                || (hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount)
-              }
-              aria-describedby={generateHelperText ? 'generate-helper' : undefined}
-              className="focus-ring min-h-11 w-full rounded-2xl bg-indigo-600 px-4 py-3 text-base font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-            >
-              {generateButtonLabel}
-            </button>
+        </section>
 
             {generateHelperText && (
               <p id="generate-helper" className="text-sm text-slate-700" role="status" aria-live="polite">
                 {generateHelperText}
               </p>
             )}
-          </div>
-
-        </section>
 
         {error && (
           <div className="rounded-2xl border border-red-300 bg-red-50 p-4 text-sm text-red-800" role="alert" aria-live="assertive">
@@ -936,7 +987,6 @@ const GeneratePage: React.FC = () => {
                 </p>
               ) : null}
             </div>
-
             {extraPickSlots.length > 0 ? (
               <div className="mt-6 border-t border-slate-200 pt-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">

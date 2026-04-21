@@ -126,7 +126,6 @@ export async function getCurrentStickers(userId: string) {
   }>(`/api/v1/jobs/current?user_id=${encodeURIComponent(userId)}`);
   return data;
 }
-
 export async function unlockCurrentExtraPicks(userId: string) {
   const { data } = await API.post<{
     status: string;
