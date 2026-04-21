@@ -19,7 +19,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-ALLOWED_STICKER_COUNTS = {15, 16}
+TARGET_STICKER_COUNT = 16
+ALLOWED_STICKER_COUNTS = {TARGET_STICKER_COUNT}
 
 GENERATION_SEMAPHORE = asyncio.Semaphore(max(1, settings.GENERATION_CONCURRENCY))
 USER_COOLDOWN: dict[str, float] = {}
@@ -40,6 +41,13 @@ def get_storage_client():
 class ResetStickerSetRequest(BaseModel):
     user_id: str
 
+class UnlockExtraPicksRequest(BaseModel):
+    user_id: str
+
+class ApplyExtraPicksRequest(BaseModel):
+    user_id: str
+    selected_indices: list[int]
+
 def _sanitize_locked_indices(indices: list[int]) -> set[int]:
     return {idx for idx in indices if isinstance(idx, int) and idx >= 0}
 
@@ -53,6 +61,12 @@ def _utc_now():
 
 def _get_jobs_collection():
     return get_db().collection("jobs")
+
+def _extract_slot_index(slot: dict) -> int:
+    try:
+        return int(slot.get("index", 9999))
+    except Exception:
+        return 9999
 
 async def _apply_user_cooldown(user_id: str) -> None:
     cooldown = max(0, settings.GENERATION_COOLDOWN_SECONDS)
@@ -71,6 +85,29 @@ async def _update_job(job_id: str, data: dict) -> None:
     data["updated_at"] = _utc_now()
     await job_ref.update(data)
 
+def _serialize_slots(slots: list[dict], storage_client: StorageClient) -> list[dict]:
+    result_slots = []
+    for slot in sorted([s for s in slots if isinstance(s, dict)], key=_extract_slot_index):
+        blob_name = slot.get("blob_name")
+        if not blob_name:
+            continue
+        result_slots.append({
+            "index": _extract_slot_index(slot),
+            "url": storage_client.generate_signed_url(blob_name),
+            "locked": bool(slot.get("locked", False)),
+        })
+    return result_slots
+
+def _serialize_extra_picks(extra_picks: list[dict], storage_client: StorageClient, unlocked: bool) -> list[dict]:
+    serialized = []
+    for pick in sorted([p for p in extra_picks if isinstance(p, dict)], key=_extract_slot_index):
+        blob_name = pick.get("blob_name")
+        serialized.append({
+            "index": _extract_slot_index(pick),
+            "url": storage_client.generate_signed_url(blob_name) if unlocked and blob_name else None,
+        })
+    return serialized
+
 async def _process_job(
     job_id: str,
     request: StickerGenerateRequest,
@@ -85,12 +122,94 @@ async def _process_job(
 
         async with GENERATION_SEMAPHORE:
             await _update_job(job_id, {"status": "processing"})
+            best_candidate: dict | None = None
+            last_quality_warnings: list[dict] = []
 
-            grid_bytes = await ai_service.generate_sticker_grid(
-                image_uri=request.image_uri,
-                style_id=request.style,
-                extra_prompt=request.prompt,
-            )
+            for attempt in range(3):
+                grid_bytes = await ai_service.generate_sticker_grid(
+                    image_uri=request.image_uri,
+                    style_id=request.style,
+                    extra_prompt=request.prompt,
+                    strict_cell_framing=attempt > 0,
+                )
+
+                sticker_images = image_processor.process_sticker_grid(grid_bytes)
+                sticker_count = len(sticker_images)
+                edge_risks = image_processor.assess_sticker_set_edge_risk(sticker_images)
+                scale_consistency = image_processor.assess_subject_scale_consistency(sticker_images)
+                quality_warnings: list[dict] = []
+                if sticker_count != TARGET_STICKER_COUNT:
+                    quality_warnings.append({
+                        "type": "layout_mismatch",
+                        "details": {
+                            "expected_sticker_count": TARGET_STICKER_COUNT,
+                            "actual_sticker_count": sticker_count,
+                        },
+                    })
+                if edge_risks:
+                    quality_warnings.append({
+                        "type": "edge_touch_risk",
+                        "details": edge_risks,
+                    })
+                if scale_consistency["is_inconsistent"]:
+                    quality_warnings.append({
+                        "type": "scale_inconsistency",
+                        "details": scale_consistency,
+                    })
+
+                candidate = {
+                    "grid_bytes": grid_bytes,
+                    "sticker_images": sticker_images,
+                    "sticker_count": sticker_count,
+                    "edge_risks": edge_risks,
+                    "scale_consistency": scale_consistency,
+                    "quality_warnings": quality_warnings,
+                    "risk_score": (
+                        abs(TARGET_STICKER_COUNT - sticker_count) * 1000
+                        + sum(int(item.get("severity", 0)) for item in edge_risks)
+                        + int(round(scale_consistency["std_ratio"] * 1000))
+                        + (len(scale_consistency["outliers"]) * 10)
+                    ),
+                }
+
+                if (
+                    best_candidate is None
+                    or candidate["risk_score"] < best_candidate["risk_score"]
+                    or (
+                        candidate["risk_score"] == best_candidate["risk_score"]
+                        and len(candidate["edge_risks"]) < len(best_candidate["edge_risks"])
+                    )
+                ):
+                    best_candidate = candidate
+
+                if sticker_count == TARGET_STICKER_COUNT and not edge_risks and not scale_consistency["is_inconsistent"]:
+                    break
+
+                last_quality_warnings = quality_warnings
+                logger.warning(
+                    "Detected sticker quality issues for job %s on attempt %d: %s",
+                    job_id,
+                    attempt + 1,
+                    quality_warnings,
+                )
+
+            if best_candidate is None:
+                raise ValueError("Sticker generation did not produce any candidate output.")
+
+            grid_bytes = best_candidate["grid_bytes"]
+            sticker_images = best_candidate["sticker_images"]
+            sticker_count = int(best_candidate["sticker_count"])
+            if sticker_count not in ALLOWED_STICKER_COUNTS:
+                raise ValueError(
+                    f"Expected exactly {TARGET_STICKER_COUNT} stickers from the generated sheet, but detected {sticker_count}. "
+                    "The source grid layout is unsupported."
+                )
+            if best_candidate["quality_warnings"]:
+                logger.warning(
+                    "Using best available sticker set for job %s despite remaining quality warnings: %s",
+                    job_id,
+                    best_candidate["quality_warnings"],
+                )
 
             # Store raw grid output for debugging / QA
             grid_blob = f"users/{request.user_id}/jobs/{job_id}/grid.png"
@@ -99,15 +218,13 @@ async def _process_job(
                 destination_blob_name=grid_blob,
                 content_type="image/png",
             )
-            await _update_job(job_id, {"grid_blob": grid_blob})
-
-            sticker_images = image_processor.process_sticker_grid(grid_bytes)
-            sticker_count = len(sticker_images)
-            if sticker_count not in ALLOWED_STICKER_COUNTS:
-                raise ValueError(
-                    f"Expected 15 or 16 stickers from the generated sheet, but detected {sticker_count}. "
-                    "The source grid layout is unsupported."
-                )
+            await _update_job(
+                job_id,
+                {
+                    "grid_blob": grid_blob,
+                    "quality_warnings": best_candidate["quality_warnings"] or last_quality_warnings,
+                },
+            )
 
             output_urls: list[str] = []
             output_blobs: list[str] = []
@@ -144,6 +261,7 @@ async def _process_job(
 
             result_slots = []
             persisted_slots = []
+            persisted_extra_picks = []
             for index in range(sticker_count):
                 use_existing = index in locked_indices and index in existing_map
                 if use_existing:
@@ -162,14 +280,26 @@ async def _process_job(
                 locked = index in locked_indices if use_existing or locked_indices else False
                 result_slots.append({"index": index, "url": url, "locked": locked})
                 persisted_slots.append({"index": index, "blob_name": blob_name, "locked": locked})
+                if use_existing:
+                    persisted_extra_picks.append({
+                        "index": index,
+                        "blob_name": output_blobs[index],
+                    })
 
-            await user_service.set_current_stickers(request.user_id, persisted_slots, job_id)
+            await user_service.set_current_generation_state(
+                request.user_id,
+                persisted_slots,
+                job_id,
+                persisted_extra_picks,
+                False,
+            )
             await _update_job(
                 job_id,
                 {
                     "status": "completed",
                     "sticker_count": sticker_count,
                     "result_slots": persisted_slots,
+                    "extra_picks": persisted_extra_picks,
                 },
             )
 
@@ -242,29 +372,83 @@ async def get_current_stickers(
     """
     assert_user_match(token_profile["line_id"], user_id)
     slots, job_id = await user_service.get_current_stickers(user_id)
+    extra_picks, _, extra_picks_unlocked = await user_service.get_current_extra_picks(user_id)
     if not slots:
-        return {"status": "empty"}
+        return {
+            "status": "empty",
+            "job_id": job_id,
+            "sticker_count": 0,
+            "result_slots": [],
+            "extra_pick_count": 0,
+            "extra_picks_unlocked": extra_picks_unlocked,
+            "extra_picks": [],
+        }
 
-    result_slots = []
-    for slot in slots:
-        if not isinstance(slot, dict):
-            continue
-        blob_name = slot.get("blob_name")
-        if not blob_name:
-            continue
-        url = storage_client.generate_signed_url(blob_name)
-        result_slots.append({
-            "index": int(slot.get("index", 0)),
-            "url": url,
-            "locked": bool(slot.get("locked", False)),
-        })
-
-    result_slots = sorted(result_slots, key=lambda s: s["index"])
+    result_slots = _serialize_slots(slots, storage_client)
+    serialized_extra_picks = _serialize_extra_picks(extra_picks, storage_client, extra_picks_unlocked)
     return {
         "status": "ok",
         "job_id": job_id,
         "sticker_count": len(result_slots),
         "result_slots": result_slots,
+        "extra_pick_count": len(serialized_extra_picks),
+        "extra_picks_unlocked": extra_picks_unlocked,
+        "extra_picks": serialized_extra_picks,
+    }
+
+@router.post("/current/extra-picks/unlock", status_code=status.HTTP_200_OK)
+async def unlock_current_extra_picks(
+    request: UnlockExtraPicksRequest,
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    assert_user_match(token_profile["line_id"], request.user_id)
+    try:
+        new_balance = await user_service.unlock_current_extra_picks(request.user_id, amount=1)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    slots, job_id = await user_service.get_current_stickers(request.user_id)
+    extra_picks, _, extra_picks_unlocked = await user_service.get_current_extra_picks(request.user_id)
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "coin_balance": new_balance,
+        "sticker_count": len(slots),
+        "result_slots": _serialize_slots(slots, storage_client),
+        "extra_pick_count": len(extra_picks),
+        "extra_picks_unlocked": extra_picks_unlocked,
+        "extra_picks": _serialize_extra_picks(extra_picks, storage_client, extra_picks_unlocked),
+    }
+
+@router.post("/current/extra-picks/apply", status_code=status.HTTP_200_OK)
+async def apply_current_extra_picks(
+    request: ApplyExtraPicksRequest,
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    assert_user_match(token_profile["line_id"], request.user_id)
+    if not request.selected_indices:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least one extra pick.")
+
+    try:
+        updated = await user_service.apply_current_extra_picks(request.user_id, request.selected_indices)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    slots = updated.get("current_stickers") or []
+    extra_picks = updated.get("current_extra_picks") or []
+    extra_picks_unlocked = bool(updated.get("current_extra_picks_unlocked", False))
+    return {
+        "status": "ok",
+        "job_id": updated.get("current_stickers_job_id"),
+        "sticker_count": len(slots),
+        "result_slots": _serialize_slots(slots, storage_client),
+        "extra_pick_count": len(extra_picks),
+        "extra_picks_unlocked": extra_picks_unlocked,
+        "extra_picks": _serialize_extra_picks(extra_picks, storage_client, extra_picks_unlocked),
     }
 
 @router.post("/reset", status_code=status.HTTP_200_OK)

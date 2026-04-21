@@ -1,4 +1,3 @@
-import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -6,8 +5,20 @@ class Settings(BaseSettings):
     GCS_BUCKET_NAME: str
     LIFF_CHANNEL_ID: str
     LINE_CHANNEL_SECRET: str
-    OMISE_SECRET_KEY: str
-    OMISE_PUBLIC_KEY: str
+    BEAM_BASE_URL: str = "https://playground.api.beamcheckout.com"
+    BEAM_MERCHANT_ID: str | None = None
+    BEAM_API_KEY: str | None = None
+    BEAM_WEBHOOK_HMAC_KEY: str | None = None
+    PAYMENT_REDIRECT_URL: str | None = None
+    PAYMENT_WEBHOOK_PUBLIC_URL: str | None = None
+    PAYMENT_LINK_EXPIRY_MINUTES: int = 30
+    PAYMENT_CURRENCY: str = "THB"
+    BEAM_ENABLE_CARD: bool = True
+    BEAM_ENABLE_CARD_INSTALLMENTS: bool = False
+    BEAM_ENABLE_QR_PROMPTPAY: bool = True
+    BEAM_ENABLE_EWALLETS: bool = False
+    BEAM_ENABLE_MOBILE_BANKING: bool = True
+    BEAM_ENABLE_BNPL: bool = False
     VERTEX_MODEL: str = "gemini-3-pro-image-preview"
     VERTEX_LOCATION: str = "global"
     GENAI_PROVIDER: str = "vertex"

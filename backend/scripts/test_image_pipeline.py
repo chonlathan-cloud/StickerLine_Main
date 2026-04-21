@@ -116,12 +116,23 @@ def main() -> int:
         columns=args.columns,
         rows=args.rows,
     )
+    edge_risks = processor.assess_sticker_set_edge_risk(outputs)
 
     print(f"Generated {len(outputs)} sticker(s)")
     for index, png_bytes in enumerate(outputs):
         file_path = output_dir / f"{args.prefix}_{index:02d}.png"
         file_path.write_bytes(png_bytes)
         _print_result(index, file_path, png_bytes)
+
+    if edge_risks:
+        print("Edge-touch risk detected:")
+        for risk in edge_risks:
+            print(
+                f"  - sticker_{risk['index']:02d}: severity={risk['severity']} "
+                f"touches={risk['touches']} margins={risk['margins']}"
+            )
+    else:
+        print("Edge-touch risk: none detected")
 
     print("Done")
     return 0

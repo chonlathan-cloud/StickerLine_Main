@@ -44,11 +44,31 @@ class ImageProcessor:
                     x_start = x_edges[col]
                     x_end = x_edges[col + 1]
 
-                    slice_img = grid_img[y_start:y_end, x_start:x_end]
-                    slice_img = self._apply_safe_inset(slice_img, inset_ratio=0.01)
+                    strict_core_img = grid_img[y_start:y_end, x_start:x_end]
+                    anchor_alpha = self._build_core_anchor_alpha(strict_core_img)
+
+                    slice_img, core_bounds = self._extract_cell_with_overscan(
+                        grid_img,
+                        x_start=x_start,
+                        x_end=x_end,
+                        y_start=y_start,
+                        y_end=y_end,
+                        overscan_x_ratio=0.03,
+                        overscan_top_ratio=0.0,
+                        overscan_bottom_ratio=0.02,
+                    )
+                    slice_img, core_bounds = self._apply_safe_inset(
+                        slice_img,
+                        core_bounds=core_bounds,
+                        inset_ratio=0.01,
+                    )
                     
                     # Step C: Process each slice
-                    output_bytes = self._process_single_sticker(slice_img)
+                    output_bytes = self._process_single_sticker(
+                        slice_img,
+                        core_bounds=core_bounds,
+                        anchor_alpha=anchor_alpha,
+                    )
                     processed_stickers.append(output_bytes)
 
             return processed_stickers
@@ -56,20 +76,196 @@ class ImageProcessor:
             logger.error(f"Error processing sticker grid: {e}")
             raise e
 
-    def _apply_safe_inset(self, cv_img: np.ndarray, inset_ratio: float = 0.02) -> np.ndarray:
+    def assess_sticker_set_edge_risk(self, sticker_pngs: List[bytes]) -> list[dict]:
+        risky: list[dict] = []
+        for index, sticker_png in enumerate(sticker_pngs):
+            metrics = self._measure_edge_touch_risk(sticker_png)
+            if not metrics["is_risky"]:
+                continue
+            risky.append({
+                "index": index,
+                "margins": metrics["margins"],
+                "touches": metrics["touches"],
+                "severity": metrics["severity"],
+            })
+        return risky
+
+    def assess_subject_scale_consistency(self, sticker_pngs: List[bytes]) -> dict:
+        ratios: list[float] = []
+        indexed_ratios: list[tuple[int, float]] = []
+        for index, sticker_png in enumerate(sticker_pngs):
+            nparr = np.frombuffer(sticker_png, np.uint8)
+            rgba = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+            if rgba is None or rgba.ndim < 3 or rgba.shape[2] < 4:
+                continue
+
+            alpha = rgba[:, :, 3]
+            bounds = self._compute_content_bounds(alpha, threshold=16)
+            if bounds is None:
+                continue
+
+            _, y1, _, y2 = bounds
+            content_height = max(1, y2 - y1)
+            ratio = float(content_height / max(1, alpha.shape[0]))
+            ratios.append(ratio)
+            indexed_ratios.append((index, ratio))
+
+        if not ratios:
+            return {
+                "is_inconsistent": False,
+                "mean_ratio": 0.0,
+                "std_ratio": 0.0,
+                "outliers": [],
+            }
+
+        mean_ratio = float(np.mean(ratios))
+        std_ratio = float(np.std(ratios))
+        outliers = [
+            {
+                "index": index,
+                "ratio": ratio,
+                "deviation": abs(ratio - mean_ratio),
+            }
+            for index, ratio in indexed_ratios
+            if abs(ratio - mean_ratio) >= 0.09
+        ]
+
+        return {
+            "is_inconsistent": bool(std_ratio >= 0.07 or len(outliers) >= 3),
+            "mean_ratio": mean_ratio,
+            "std_ratio": std_ratio,
+            "outliers": outliers,
+        }
+
+    def _extract_cell_with_overscan(
+        self,
+        grid_img: np.ndarray,
+        x_start: int,
+        x_end: int,
+        y_start: int,
+        y_end: int,
+        overscan_x_ratio: float,
+        overscan_top_ratio: float,
+        overscan_bottom_ratio: float,
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        height, width = grid_img.shape[:2]
+        cell_w = max(1, x_end - x_start)
+        cell_h = max(1, y_end - y_start)
+        overscan_x = max(2, int(round(cell_w * overscan_x_ratio)))
+        overscan_top = max(0, int(round(cell_h * overscan_top_ratio)))
+        overscan_bottom = max(1, int(round(cell_h * overscan_bottom_ratio)))
+
+        left = max(0, x_start - overscan_x)
+        right = min(width, x_end + overscan_x)
+        top = max(0, y_start - overscan_top)
+        bottom = min(height, y_end + overscan_bottom)
+        core_bounds = (
+            int(x_start - left),
+            int(y_start - top),
+            int(x_end - left),
+            int(y_end - top),
+        )
+        return grid_img[top:bottom, left:right], core_bounds
+
+    def _build_core_anchor_alpha(self, core_img: np.ndarray) -> np.ndarray:
+        rgba = self._extract_foreground_rgba(core_img)
+        rgba[:, :, 3] = self._filter_foreground_components(rgba[:, :, 3])
+        rgba[:, :, 3] = self._remove_pure_green_pockets(core_img, rgba[:, :, 3])
+        rgba[:, :, 3] = self._choke_alpha(rgba[:, :, 3], choke_radius=1.4, feather=0.8)
+        return rgba[:, :, 3]
+
+    def _apply_safe_inset(
+        self,
+        cv_img: np.ndarray,
+        core_bounds: Tuple[int, int, int, int] | None = None,
+        inset_ratio: float = 0.02,
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int] | None]:
         """
-        Trim a small inset from each cell to avoid bleed from adjacent cells.
+        Trim only the edges that are still mostly pure green gutter. This keeps
+        adjacent-cell bleed out, but avoids clipping legitimate content that was
+        rendered too close to the cell border.
         """
         height, width = cv_img.shape[:2]
         inset_x = int(round(width * inset_ratio))
         inset_y = int(round(height * inset_ratio))
         if inset_x <= 0 and inset_y <= 0:
-            return cv_img
-        x_start = min(inset_x, width - 1)
-        y_start = min(inset_y, height - 1)
-        x_end = max(width - inset_x, x_start + 1)
-        y_end = max(height - inset_y, y_start + 1)
-        return cv_img[y_start:y_end, x_start:x_end]
+            return cv_img, core_bounds
+
+        green_mask = self._grid_green_mask(cv_img)
+        edge_green_threshold = 0.9
+
+        trim_left = inset_x if inset_x > 0 and float(green_mask[:, :inset_x].mean()) >= edge_green_threshold else 0
+        trim_right = inset_x if inset_x > 0 and float(green_mask[:, width - inset_x:].mean()) >= edge_green_threshold else 0
+        trim_top = inset_y if inset_y > 0 and float(green_mask[:inset_y, :].mean()) >= edge_green_threshold else 0
+        trim_bottom = inset_y if inset_y > 0 and float(green_mask[height - inset_y:, :].mean()) >= edge_green_threshold else 0
+
+        x_start = min(trim_left, width - 1)
+        y_start = min(trim_top, height - 1)
+        x_end = max(width - trim_right, x_start + 1)
+        y_end = max(height - trim_bottom, y_start + 1)
+        adjusted_core_bounds = core_bounds
+        if core_bounds is not None:
+            cx1, cy1, cx2, cy2 = core_bounds
+            new_width = x_end - x_start
+            new_height = y_end - y_start
+            new_cx1 = max(0, min(new_width - 1, cx1 - x_start))
+            new_cy1 = max(0, min(new_height - 1, cy1 - y_start))
+            new_cx2 = max(new_cx1 + 1, min(new_width, cx2 - x_start))
+            new_cy2 = max(new_cy1 + 1, min(new_height, cy2 - y_start))
+            adjusted_core_bounds = (
+                new_cx1,
+                new_cy1,
+                new_cx2,
+                new_cy2,
+            )
+        return cv_img[y_start:y_end, x_start:x_end], adjusted_core_bounds
+
+    def _measure_edge_touch_risk(self, sticker_png: bytes) -> dict:
+        nparr = np.frombuffer(sticker_png, np.uint8)
+        rgba = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.ndim < 3 or rgba.shape[2] < 4:
+            return {"is_risky": False, "margins": {}, "touches": {}, "severity": 0}
+
+        alpha = rgba[:, :, 3]
+        bounds = self._compute_content_bounds(alpha, threshold=16)
+        if bounds is None:
+            return {"is_risky": False, "margins": {}, "touches": {}, "severity": 0}
+
+        x1, y1, x2, y2 = bounds
+        height, width = alpha.shape
+        margins = {
+            "left": int(x1),
+            "top": int(y1),
+            "right": int(max(0, width - x2)),
+            "bottom": int(max(0, height - y2)),
+        }
+
+        band = max(3, min(width, height) // 60)
+        alpha_threshold = 16
+        touches = {
+            "left": bool(np.any(alpha[:, :band] > alpha_threshold)),
+            "top": bool(np.any(alpha[:band, :] > alpha_threshold)),
+            "right": bool(np.any(alpha[:, width - band:] > alpha_threshold)),
+            "bottom": bool(np.any(alpha[height - band:, :] > alpha_threshold)),
+        }
+
+        tight_margin = 8
+        severe_margin = 4
+        risky_edges = [
+            edge for edge, margin in margins.items()
+            if touches[edge] and margin <= tight_margin
+        ]
+        severe_edges = [
+            edge for edge, margin in margins.items()
+            if touches[edge] and margin <= severe_margin
+        ]
+
+        return {
+            "is_risky": bool(risky_edges),
+            "margins": margins,
+            "touches": touches,
+            "severity": len(severe_edges) * 2 + len(risky_edges),
+        }
 
     def _equal_edges(self, size: int, segments: int) -> np.ndarray:
         segment_count = max(1, int(segments))
@@ -138,12 +334,7 @@ class ImageProcessor:
         return best_layout[0], best_layout[1], best_x_edges, best_y_edges
 
     def _candidate_layouts_for_image(self, width: int, height: int) -> list[Tuple[int, int]]:
-        aspect = width / max(height, 1)
-        if aspect >= 1.12:
-            return [(5, 3), (4, 4), (3, 5)]
-        if aspect <= 0.88:
-            return [(3, 5), (4, 4), (5, 3)]
-        return [(4, 4), (5, 3), (3, 5)]
+        return [(4, 4)]
 
     def _score_grid_layout(
         self,
@@ -405,10 +596,24 @@ class ImageProcessor:
             # Fallback to original if trimming fails
             return cv_img
 
-    def _process_single_sticker(self, cv_img: np.ndarray) -> bytes:
+    def _process_single_sticker(
+        self,
+        cv_img: np.ndarray,
+        core_bounds: Tuple[int, int, int, int] | None = None,
+        anchor_alpha: np.ndarray | None = None,
+    ) -> bytes:
         # 1. Extract foreground from the green background using a cell-local chroma key.
         rgba = self._extract_foreground_rgba(cv_img)
-        rgba[:, :, 3] = self._filter_foreground_components(rgba[:, :, 3])
+        rgba[:, :, 3] = self._filter_foreground_components(
+            rgba[:, :, 3],
+            core_bounds=core_bounds,
+            anchor_alpha=anchor_alpha,
+        )
+        rgba[:, :, 3] = self._cleanup_top_strip_artifacts(
+            rgba[:, :, 3],
+            core_bounds=core_bounds,
+            anchor_alpha=anchor_alpha,
+        )
         rgba[:, :, 3] = self._remove_pure_green_pockets(cv_img, rgba[:, :, 3])
         rgba[:, :, 3] = self._choke_alpha(rgba[:, :, 3], choke_radius=2.0, feather=0.85)
         rgba = self._degreen_edges(rgba)
@@ -422,9 +627,9 @@ class ImageProcessor:
                 bounds,
                 width=rgba.shape[1],
                 height=rgba.shape[0],
-                pad_x_ratio=0.07,
-                pad_top_ratio=0.06,
-                pad_bottom_ratio=0.12,
+                pad_x_ratio=0.08,
+                pad_top_ratio=0.10,
+                pad_bottom_ratio=0.16,
             )
             rgba = rgba[y1:y2, x1:x2]
 
@@ -640,7 +845,12 @@ class ImageProcessor:
         alpha_u8 = cv2.GaussianBlur(alpha_u8, (0, 0), 0.65)
         return alpha_u8
 
-    def _filter_foreground_components(self, alpha: np.ndarray) -> np.ndarray:
+    def _filter_foreground_components(
+        self,
+        alpha: np.ndarray,
+        core_bounds: Tuple[int, int, int, int] | None = None,
+        anchor_alpha: np.ndarray | None = None,
+    ) -> np.ndarray:
         """
         Keep the primary sticker subject and nearby caption/accessories while
         dropping border debris from neighboring cells or failed masks.
@@ -654,19 +864,70 @@ class ImageProcessor:
             return alpha
 
         height, width = alpha.shape
-        min_area = max(20, int(height * width * 0.00045))
+        min_area = max(12, int(height * width * 0.00028))
         prominent_area = max(80, int(height * width * 0.012))
 
+        core_focus: Tuple[int, int, int, int] | None = None
+        anchor_projection: np.ndarray | None = None
+        anchor_projection_dilated: np.ndarray | None = None
+        if core_bounds is not None:
+            cx1, cy1, cx2, cy2 = core_bounds
+            core_w = max(1, cx2 - cx1)
+            core_h = max(1, cy2 - cy1)
+            core_focus = (
+                max(0, cx1 - max(4, int(round(core_w * 0.18)))),
+                max(0, cy1 - max(4, int(round(core_h * 0.22)))),
+                min(width, cx2 + max(4, int(round(core_w * 0.18)))),
+                min(height, cy2 + max(4, int(round(core_h * 0.18)))),
+            )
+            if anchor_alpha is not None and anchor_alpha.size > 0:
+                anchor_h, anchor_w = anchor_alpha.shape[:2]
+                target_w = max(1, min(anchor_w, cx2 - cx1))
+                target_h = max(1, min(anchor_h, cy2 - cy1))
+                resized_anchor = anchor_alpha
+                if anchor_w != target_w or anchor_h != target_h:
+                    resized_anchor = cv2.resize(anchor_alpha, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+                anchor_projection = np.zeros_like(mask, dtype=np.uint8)
+                anchor_projection[cy1:cy1 + target_h, cx1:cx1 + target_w] = (resized_anchor > 18).astype(np.uint8)
+                kernel_w = max(3, int(round(target_w * 0.08)))
+                kernel_h = max(3, int(round(target_h * 0.08)))
+                dilation_kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (kernel_w | 1, kernel_h | 1),
+                )
+                anchor_projection_dilated = cv2.dilate(anchor_projection, dilation_kernel, iterations=1)
+
+        primary_candidates: list[tuple[int, int]] = []
         component_areas = stats[1:, cv2.CC_STAT_AREA]
-        primary_label = int(np.argmax(component_areas)) + 1
+        if core_focus is not None:
+            fx1, fy1, fx2, fy2 = core_focus
+            for label in range(1, num_labels):
+                x = int(stats[label, cv2.CC_STAT_LEFT])
+                y = int(stats[label, cv2.CC_STAT_TOP])
+                w = int(stats[label, cv2.CC_STAT_WIDTH])
+                h = int(stats[label, cv2.CC_STAT_HEIGHT])
+                overlaps_focus = not (
+                    (x + w) < fx1
+                    or x > fx2
+                    or (y + h) < fy1
+                    or y > fy2
+                )
+                if overlaps_focus:
+                    primary_candidates.append((label, int(stats[label, cv2.CC_STAT_AREA])))
+
+        if primary_candidates:
+            primary_label = max(primary_candidates, key=lambda item: item[1])[0]
+        else:
+            primary_label = int(np.argmax(component_areas)) + 1
         px = int(stats[primary_label, cv2.CC_STAT_LEFT])
         py = int(stats[primary_label, cv2.CC_STAT_TOP])
         pw = int(stats[primary_label, cv2.CC_STAT_WIDTH])
         ph = int(stats[primary_label, cv2.CC_STAT_HEIGHT])
 
-        expand_x = int(round(width * 0.18))
-        expand_top = int(round(height * 0.10))
-        expand_bottom = int(round(height * 0.34))
+        expand_x = int(round(width * 0.22))
+        expand_top = int(round(height * 0.24))
+        expand_bottom = int(round(height * 0.38))
         primary_left = max(0, px - expand_x)
         primary_top = max(0, py - expand_top)
         primary_right = min(width, px + pw + expand_x)
@@ -679,8 +940,6 @@ class ImageProcessor:
             w = int(stats[label, cv2.CC_STAT_WIDTH])
             h = int(stats[label, cv2.CC_STAT_HEIGHT])
             area = int(stats[label, cv2.CC_STAT_AREA])
-            if area < min_area:
-                continue
 
             cx = x + (w / 2.0)
             cy = y + (h / 2.0)
@@ -691,15 +950,45 @@ class ImageProcessor:
                 or (y + h) < primary_top
                 or y > primary_bottom
             )
-            caption_like = (
+            overlaps_core_focus = True
+            if core_focus is not None:
+                fx1, fy1, fx2, fy2 = core_focus
+                overlaps_core_focus = not (
+                    (x + w) < fx1
+                    or x > fx2
+                    or (y + h) < fy1
+                    or y > fy2
+                )
+            overlaps_anchor = True
+            if anchor_projection_dilated is not None:
+                label_mask = (labels == label).astype(np.uint8)
+                overlaps_anchor = bool(np.any(anchor_projection_dilated & label_mask))
+            support_like = (
                 primary_left <= cx <= primary_right
-                and py <= cy <= primary_bottom
+                and primary_top <= cy <= primary_bottom
             )
+
+            if core_bounds is not None:
+                cx1, cy1, cx2, cy2 = core_bounds
+                core_h = max(1, cy2 - cy1)
+                top_foreign_cutoff = cy1 + max(2, int(round(core_h * 0.045)))
+                entirely_above_core = (y + h) <= top_foreign_cutoff
+                if entirely_above_core and not overlaps_anchor and label != primary_label:
+                    continue
+
+            if anchor_projection_dilated is not None and not overlaps_anchor and label != primary_label and not overlaps_primary:
+                continue
+
+            if core_focus is not None and not overlaps_core_focus and label != primary_label and not overlaps_primary:
+                continue
+
+            if area < min_area and not support_like:
+                continue
 
             keep = (
                 label == primary_label
                 or overlaps_primary
-                or caption_like
+                or support_like
                 or (area >= prominent_area and not touches_hard_border)
             )
             if keep:
@@ -711,6 +1000,73 @@ class ImageProcessor:
         cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         cleaned_alpha = np.where(cleaned_mask > 0, cleaned_alpha, 0).astype(np.uint8)
         return cleaned_alpha
+
+    def _cleanup_top_strip_artifacts(
+        self,
+        alpha: np.ndarray,
+        core_bounds: Tuple[int, int, int, int] | None = None,
+        anchor_alpha: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if alpha is None or alpha.size == 0 or core_bounds is None:
+            return alpha
+
+        height, width = alpha.shape
+        cx1, cy1, cx2, cy2 = core_bounds
+        core_h = max(1, cy2 - cy1)
+        strip_bottom = min(height, max(4, cy1 + int(round(core_h * 0.14))))
+        if strip_bottom <= 0:
+            return alpha
+
+        mask = (alpha > 18).astype(np.uint8)
+        strip_mask = np.zeros_like(mask, dtype=np.uint8)
+        strip_mask[:strip_bottom, :] = mask[:strip_bottom, :]
+        if not np.any(strip_mask):
+            return alpha
+
+        anchor_projection_dilated: np.ndarray | None = None
+        if anchor_alpha is not None and anchor_alpha.size > 0:
+            anchor_h, anchor_w = anchor_alpha.shape[:2]
+            target_w = max(1, min(anchor_w, cx2 - cx1))
+            target_h = max(1, min(anchor_h, cy2 - cy1))
+            resized_anchor = anchor_alpha
+            if anchor_w != target_w or anchor_h != target_h:
+                resized_anchor = cv2.resize(anchor_alpha, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+            anchor_projection = np.zeros_like(mask, dtype=np.uint8)
+            anchor_projection[cy1:cy1 + target_h, cx1:cx1 + target_w] = (resized_anchor > 18).astype(np.uint8)
+            dilation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            anchor_projection_dilated = cv2.dilate(anchor_projection, dilation_kernel, iterations=1)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(strip_mask, connectivity=8)
+        if num_labels <= 1:
+            return alpha
+
+        cleaned = alpha.copy()
+        strip_midline = max(1, int(round(strip_bottom * 0.72)))
+        for label in range(1, num_labels):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area <= 0:
+                continue
+
+            mostly_upper_strip = (y + h) <= strip_midline
+            if not mostly_upper_strip:
+                continue
+
+            label_mask = (labels == label).astype(np.uint8)
+            overlaps_anchor = False
+            if anchor_projection_dilated is not None:
+                overlaps_anchor = bool(np.any(anchor_projection_dilated & label_mask))
+
+            if overlaps_anchor:
+                continue
+
+            cleaned[labels == label] = 0
+
+        return cleaned
 
     def _degreen_edges(self, rgba_img: np.ndarray) -> np.ndarray:
         """

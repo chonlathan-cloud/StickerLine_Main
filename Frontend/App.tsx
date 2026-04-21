@@ -54,14 +54,7 @@ const App: React.FC = () => {
           </RequireAuth>
         }
       />
-      <Route
-        path="/payment"
-        element={
-          <RequireAuth>
-            <PaymentPage />
-          </RequireAuth>
-        }
-      />
+      <Route path="/payment" element={<PaymentPage />} />
       <Route path="*" element={<Navigate to="/generate" replace />} />
     </Routes>
   );

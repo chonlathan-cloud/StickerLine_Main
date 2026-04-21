@@ -34,6 +34,10 @@ class UserService:
                 current_stickers=[],
                 current_stickers_job_id=None,
                 current_stickers_updated_at=None,
+                current_extra_picks=[],
+                current_extra_picks_job_id=None,
+                current_extra_picks_unlocked=False,
+                current_extra_picks_updated_at=None,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
@@ -83,11 +87,44 @@ class UserService:
             "updated_at": datetime.now(timezone.utc),
         })
 
+    async def get_current_extra_picks(self, user_id: str) -> tuple[list[dict], str | None, bool]:
+        user_ref = self.users_collection.document(user_id)
+        snapshot = await user_ref.get()
+        if not snapshot.exists:
+            raise ValueError(f"User {user_id} not found")
+
+        data = snapshot.to_dict() or {}
+        picks = data.get("current_extra_picks") or []
+        job_id = data.get("current_extra_picks_job_id")
+        unlocked = bool(data.get("current_extra_picks_unlocked", False))
+        return picks, job_id, unlocked
+
+    async def set_current_generation_state(
+        self,
+        user_id: str,
+        slots: list[dict],
+        job_id: str | None,
+        extra_picks: list[dict],
+        extra_picks_unlocked: bool = False,
+    ) -> None:
+        user_ref = self.users_collection.document(user_id)
+        now = datetime.now(timezone.utc)
+        await user_ref.update({
+            "current_stickers": slots,
+            "current_stickers_job_id": job_id,
+            "current_stickers_updated_at": now,
+            "current_extra_picks": extra_picks,
+            "current_extra_picks_job_id": job_id,
+            "current_extra_picks_unlocked": extra_picks_unlocked,
+            "current_extra_picks_updated_at": now,
+            "updated_at": now,
+        })
+
     async def reset_current_stickers(self, user_id: str) -> None:
         """
         Clear the current sticker set when a new source image is uploaded.
         """
-        await self.set_current_stickers(user_id, [], None)
+        await self.set_current_generation_state(user_id, [], None, [], False)
 
     async def get_display_name(self, user_id: str) -> str | None:
         user_ref = self.users_collection.document(user_id)
@@ -217,3 +254,101 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to top up coin for {user_id}: {e}")
             raise
+
+    async def unlock_current_extra_picks(self, user_id: str, amount: int = 1) -> int:
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+
+        @firestore.async_transactional
+        async def atomic_unlock(transaction, user_ref, amount):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+
+            data = snapshot.to_dict() or {}
+            extra_picks = data.get("current_extra_picks") or []
+            if not extra_picks:
+                raise ValueError("No extra picks available for this session.")
+            if bool(data.get("current_extra_picks_unlocked", False)):
+                return int(data.get("coin_balance", 0))
+
+            balance = int(data.get("coin_balance", 0))
+            if balance < amount:
+                raise InsufficientCoinsError(f"Not enough coins. Balance: {balance}, Required: {amount}")
+
+            new_balance = balance - amount
+            now = datetime.now(timezone.utc)
+            transaction.update(user_ref, {
+                "coin_balance": new_balance,
+                "current_extra_picks_unlocked": True,
+                "current_extra_picks_updated_at": now,
+                "updated_at": now,
+            })
+            return new_balance
+
+        new_balance = await atomic_unlock(transaction, user_ref, amount)
+        logger.info("Unlocked extra picks for %s. New balance: %s", user_id, new_balance)
+        return new_balance
+
+    async def apply_current_extra_picks(self, user_id: str, selected_indices: list[int]) -> dict:
+        transaction = self.db.transaction()
+        user_ref = self.users_collection.document(user_id)
+        normalized_indices = sorted({idx for idx in selected_indices if isinstance(idx, int) and idx >= 0})
+
+        @firestore.async_transactional
+        async def atomic_apply(transaction, user_ref, normalized_indices):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+
+            data = snapshot.to_dict() or {}
+            if not bool(data.get("current_extra_picks_unlocked", False)):
+                raise ValueError("Extra picks are locked.")
+
+            current_stickers = [slot for slot in (data.get("current_stickers") or []) if isinstance(slot, dict)]
+            current_extra_picks = [pick for pick in (data.get("current_extra_picks") or []) if isinstance(pick, dict)]
+
+            slots_by_index = {
+                int(slot.get("index")): dict(slot)
+                for slot in current_stickers
+                if isinstance(slot.get("index"), int)
+            }
+            extra_by_index = {
+                int(pick.get("index")): dict(pick)
+                for pick in current_extra_picks
+                if isinstance(pick.get("index"), int)
+            }
+
+            for index in normalized_indices:
+                slot = slots_by_index.get(index)
+                extra = extra_by_index.get(index)
+                if slot is None or extra is None:
+                    continue
+                slot_blob = slot.get("blob_name")
+                extra_blob = extra.get("blob_name")
+                if not slot_blob or not extra_blob:
+                    continue
+                slot["blob_name"], extra["blob_name"] = extra_blob, slot_blob
+                slots_by_index[index] = slot
+                extra_by_index[index] = extra
+
+            updated_slots = sorted(slots_by_index.values(), key=lambda item: int(item.get("index", 9999)))
+            updated_extras = sorted(extra_by_index.values(), key=lambda item: int(item.get("index", 9999)))
+            now = datetime.now(timezone.utc)
+            transaction.update(user_ref, {
+                "current_stickers": updated_slots,
+                "current_stickers_updated_at": now,
+                "current_extra_picks": updated_extras,
+                "current_extra_picks_updated_at": now,
+                "updated_at": now,
+            })
+            return {
+                "current_stickers": updated_slots,
+                "current_extra_picks": updated_extras,
+                "current_stickers_job_id": data.get("current_stickers_job_id"),
+                "current_extra_picks_unlocked": bool(data.get("current_extra_picks_unlocked", False)),
+            }
+
+        result = await atomic_apply(transaction, user_ref, normalized_indices)
+        logger.info("Applied extra picks for %s on indices %s", user_id, normalized_indices)
+        return result
