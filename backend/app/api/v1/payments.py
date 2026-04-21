@@ -25,7 +25,7 @@ async def create_payment(
 ) -> dict:
     try:
         assert_user_match(token_profile["line_id"], request.user_id)
-        result = await payment_service.create_promptpay_charge(
+        result = await payment_service.create_payment_link(
             user_id=request.user_id,
             package_id=request.package_id,
         )
@@ -39,12 +39,20 @@ async def create_payment(
 
 @router.get("/status")
 async def get_payment_status(
-    charge_id: str = Query(..., min_length=3),
+    payment_link_id: str | None = Query(None, min_length=3),
+    charge_id: str | None = Query(None, min_length=3),
     payment_service: PaymentService = Depends(get_payment_service),
     token_profile: dict = Depends(get_line_profile),
 ) -> dict:
     try:
-        result = await payment_service.get_payment_status(charge_id)
+        resolved_payment_id = payment_link_id or charge_id
+        if not resolved_payment_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="payment_link_id is required",
+            )
+
+        result = await payment_service.get_payment_status(resolved_payment_id)
         if result.get("user_id"):
             assert_user_match(token_profile["line_id"], result["user_id"])
         result.pop("user_id", None)

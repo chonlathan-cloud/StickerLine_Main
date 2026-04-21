@@ -91,7 +91,6 @@ const GeneratePage: React.FC = () => {
   const [isSharingToPhotos, setIsSharingToPhotos] = useState(false);
   const [extraPickSlots, setExtraPickSlots] = useState<ExtraPickSlot[]>([]);
   const [isExtraPicksUnlocked, setIsExtraPicksUnlocked] = useState(false);
-  const [selectedExtraPickIndices, setSelectedExtraPickIndices] = useState<number[]>([]);
   const [isUnlockingExtraPicks, setIsUnlockingExtraPicks] = useState(false);
   const [isApplyingExtraPicks, setIsApplyingExtraPicks] = useState(false);
 
@@ -140,7 +139,6 @@ const GeneratePage: React.FC = () => {
       })),
     );
     setIsExtraPicksUnlocked(Boolean(data.extra_picks_unlocked));
-    setSelectedExtraPickIndices([]);
   };
 
   useEffect(() => {
@@ -207,7 +205,6 @@ const GeneratePage: React.FC = () => {
         setStickerSlots([]);
         setExtraPickSlots([]);
         setIsExtraPicksUnlocked(false);
-        setSelectedExtraPickIndices([]);
         setJobId(null);
         setGenerationTargetCount(DEFAULT_STICKER_COUNT);
         setError(null);
@@ -334,13 +331,6 @@ const GeneratePage: React.FC = () => {
     setError(null);
   };
 
-  const toggleExtraPickSelection = (index: number) => {
-    setSelectedExtraPickIndices((prev) =>
-      prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index].sort((a, b) => a - b),
-    );
-    setError(null);
-  };
-
   const handleUnlockExtraPicks = async () => {
     if (!profile?.userId || extraPickSlots.length === 0) {
       setError('ไม่มี Extra Picks ให้ปลดล็อกในรอบนี้');
@@ -361,19 +351,19 @@ const GeneratePage: React.FC = () => {
     }
   };
 
-  const handleApplyExtraPicks = async () => {
-    if (!profile?.userId || selectedExtraPickIndices.length === 0) {
-      setError('เลือก Extra Picks อย่างน้อย 1 รูปก่อน');
+  const handleUseExtraPick = async (index: number) => {
+    if (!profile?.userId) {
+      setError('กรุณาเข้าสู่ระบบก่อนใช้งาน Extra Picks');
       return;
     }
 
     try {
       setIsApplyingExtraPicks(true);
       setError(null);
-      const data = await applyCurrentExtraPicks(profile.userId, selectedExtraPickIndices);
+      const data = await applyCurrentExtraPicks(profile.userId, [index]);
       hydrateCurrentGeneration(data);
     } catch (err: any) {
-      const message = err?.response?.data?.detail || err?.message || 'Failed to apply Extra Picks.';
+      const message = err?.response?.data?.detail || err?.message || 'Failed to move extra pick into the final pack.';
       setError(message);
     } finally {
       setIsApplyingExtraPicks(false);
@@ -568,7 +558,6 @@ const GeneratePage: React.FC = () => {
   };
 
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
-  const selectedExtraPickCount = selectedExtraPickIndices.length;
   const currentStickerCount = stickerSlots.length;
   const isMobile = isMobileDevice();
   const isAndroid = isAndroidDevice();
@@ -963,47 +952,41 @@ const GeneratePage: React.FC = () => {
                 </div>
 
                 <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {extraPickSlots.map((slot) => {
-                    const selected = selectedExtraPickIndices.includes(slot.index);
-                    return (
-                      <button
-                        type="button"
-                        key={slot.id}
-                        onClick={() => {
-                          if (isExtraPicksUnlocked) {
-                            toggleExtraPickSelection(slot.index);
-                          }
-                        }}
-                        disabled={!isExtraPicksUnlocked || isApplyingExtraPicks}
-                        aria-pressed={selected}
-                        className={`relative overflow-hidden rounded-2xl border p-[3px] ${
-                          selected
-                            ? 'border-emerald-400 ring-2 ring-emerald-200'
-                            : 'border-slate-200'
-                        } ${!isExtraPicksUnlocked ? 'cursor-default' : ''}`}
-                      >
-                        {slot.url ? (
-                          <img
-                            src={slot.url}
-                            alt={`Extra pick for sticker ${slot.index + 1}`}
-                            className="aspect-square w-full rounded-xl bg-white object-contain"
-                          />
-                        ) : (
-                          <div className="flex aspect-square w-full items-center justify-center rounded-xl bg-slate-100 text-center text-sm font-medium text-slate-500">
-                            Unlock 1 Coin
-                          </div>
-                        )}
-                        <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
-                          Slot {slot.index + 1}
+                  {extraPickSlots.map((slot) => (
+                    <button
+                      type="button"
+                      key={slot.id}
+                      onClick={() => {
+                        if (isExtraPicksUnlocked) {
+                          handleUseExtraPick(slot.index);
+                        }
+                      }}
+                      disabled={!isExtraPicksUnlocked || isApplyingExtraPicks}
+                      className={`relative overflow-hidden rounded-2xl border p-[3px] ${
+                        isExtraPicksUnlocked ? 'border-slate-200 hover:border-emerald-400' : 'border-slate-200'
+                      } ${!isExtraPicksUnlocked ? 'cursor-default' : ''}`}
+                    >
+                      {slot.url ? (
+                        <img
+                          src={slot.url}
+                          alt={`Extra pick for sticker ${slot.index + 1}`}
+                          className="aspect-square w-full rounded-xl bg-white object-contain"
+                        />
+                      ) : (
+                        <div className="flex aspect-square w-full items-center justify-center rounded-xl bg-slate-100 text-center text-sm font-medium text-slate-500">
+                          Unlock 1 Coin
+                        </div>
+                      )}
+                      <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
+                        Slot {slot.index + 1}
+                      </span>
+                      {isExtraPicksUnlocked ? (
+                        <span className="absolute bottom-2 right-2 rounded-full bg-emerald-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
+                          Use in Final
                         </span>
-                        {selected ? (
-                          <span className="pointer-events-none absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/90 text-xs font-bold text-white shadow">
-                            ✓
-                          </span>
-                        ) : null}
-                      </button>
-                    );
-                  })}
+                      ) : null}
+                    </button>
+                  ))}
                 </div>
 
                 {!isExtraPicksUnlocked ? (
@@ -1026,20 +1009,11 @@ const GeneratePage: React.FC = () => {
                   </div>
                 ) : (
                   <div className="mt-4 space-y-2">
-                    <button
-                      type="button"
-                      onClick={handleApplyExtraPicks}
-                      disabled={isApplyingExtraPicks || selectedExtraPickCount === 0}
-                      className="focus-ring min-h-11 w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-                    >
-                      {isApplyingExtraPicks
-                        ? 'Applying...'
-                        : selectedExtraPickCount > 0
-                          ? `Apply Selected (${selectedExtraPickCount})`
-                          : 'Select Extra Picks to Apply'}
-                    </button>
                     <p className="text-sm text-slate-600">
-                      เลือก Extra Picks ที่ต้องการ แล้วระบบจะสลับเข้า pack ตาม slot เดิม
+                      แตะรูปที่ต้องการ แล้วระบบจะสลับรูปนั้นเข้า final pack ตาม slot เดิมทันที
+                    </p>
+                    <p className="text-sm text-slate-600">
+                      เมื่อ final 16 เป็นชุดที่พอใจแล้ว กด Save to Photos ได้เลย
                     </p>
                   </div>
                 )}
