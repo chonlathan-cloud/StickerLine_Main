@@ -5,38 +5,93 @@ import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
 
+// --- Icons ---
+const WalletIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
+    <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
+    <path d="M18 12a2 2 0 0 0 0 4h4v-4Z" />
+  </svg>
+);
+
+const CreditCardIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <rect width="20" height="14" x="2" y="5" rx="2" />
+    <line x1="2" x2="22" y1="10" y2="10" />
+  </svg>
+);
+
+const ClockIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </svg>
+);
+
+const ShieldCheckIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
+    <path d="m9 12 2 2 4-4" />
+  </svg>
+);
+
+const ZapIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+  </svg>
+);
+
+const WalletOutlineIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
+    <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
+    <path d="M18 12a2 2 0 0 0 0 4h4v-4Z" />
+  </svg>
+);
+
+const PlusCircleIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M8 12h8"/>
+    <path d="M12 8v8"/>
+  </svg>
+);
+
+const ChevronRightIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="m9 18 6-6-6-6"/>
+  </svg>
+);
+
 type PackageOption = {
   id: 'pkg_70' | 'pkg_100';
   title: string;
-  priceLabel: string;
-  amount: number;
+  subtitle: string;
+  price: string;
   coins: number;
   highlight?: string;
-  accent: string;
-  description: string;
+  paymentMethods: string;
 };
 
 type PaymentFlowStatus = 'idle' | 'redirecting' | 'checking' | 'pending' | 'success' | 'failed';
 
 const PACKAGES: PackageOption[] = [
-  {
-    id: 'pkg_70',
-    title: 'Starter Pack',
-    priceLabel: '70 THB',
-    amount: 70,
+  { 
+    id: 'pkg_70', 
+    title: 'แพ็กเริ่มต้น', 
+    subtitle: 'เหมาะสำหรับลองใช้งานครั้งแรก',
+    price: '70 THB', 
     coins: 7,
-    accent: 'from-sky-500 to-cyan-500',
-    description: 'เหมาะสำหรับทดลองเติมครั้งแรก',
+    paymentMethods: 'ชำระผ่าน Beam / UOB'
   },
-  {
-    id: 'pkg_100',
-    title: 'Best Value',
-    priceLabel: '100 THB',
-    amount: 100,
-    coins: 12,
-    highlight: 'โบนัส +2 coins',
-    accent: 'from-emerald-500 to-teal-500',
-    description: 'แพ็กยอดนิยม ได้เหรียญคุ้มกว่า',
+  { 
+    id: 'pkg_100', 
+    title: 'แพ็กคุ้มค่า', 
+    subtitle: 'แพ็กยอดนิยม ได้เหรียญคุ้มกว่า',
+    price: '100 THB', 
+    coins: 12, 
+    highlight: 'โบนัส +2 เหรียญ',
+    paymentMethods: 'ชำระผ่าน Beam / UOB'
   },
 ];
 
@@ -139,6 +194,7 @@ const PaymentPage: React.FC = () => {
 
   const shouldRedirect = isReady && !isAuthenticated;
   const pendingPackage = PACKAGES.find((pkg) => pkg.id === pendingPackageId) ?? null;
+  const activePackage = PACKAGES.find((pkg) => pkg.id === (selectedPackageId ?? pendingPackageId)) ?? null;
 
   const projectedCoinBalance = useMemo(() => {
     if (coinBalance == null || !pendingPackage || status === 'success') return null;
@@ -147,6 +203,7 @@ const PaymentPage: React.FC = () => {
 
   const expiryLabel = useMemo(() => formatDateTime(expiresAt), [expiresAt]);
   const expiryHint = useMemo(() => formatRemainingTime(expiresAt), [expiresAt]);
+  const currentCoins = coinBalance || 0;
 
   useEffect(() => {
     if (!isReady || !isAuthenticated) return;
@@ -260,155 +317,139 @@ const PaymentPage: React.FC = () => {
 
   return (
     <PageLayout isOnline={isOnline}>
-      <main className="mx-auto flex w-full max-w-md flex-col gap-4 px-4 pb-8 pt-6 sm:max-w-xl">
-        <section className="overflow-hidden rounded-[2.75rem] border border-slate-200 bg-white shadow-sm">
-          <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 px-6 py-6 text-white">
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/60">Top Up</p>
-            <h1 className="mt-2 text-3xl font-semibold">เติมเหรียญสำหรับสร้างสติกเกอร์</h1>
-            <p className="mt-2 text-sm text-white/75">
-              ระบบจะพาคุณไปยังหน้าชำระเงินของ Beam / UOB ที่ปลอดภัย จากนั้นพากลับมาที่แอปโดยอัตโนมัติ
+      <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 pb-12 pt-6">
+        
+        {/* Top Header Card */}
+        <section className="rounded-[28px] bg-white p-6 md:p-8 shadow-sm border border-slate-200 flex flex-col gap-6 relative">
+          
+          <div className="relative z-10">
+            <div className="flex items-center gap-2 mb-3 text-slate-500">
+              <PlusCircleIcon className="w-5 h-5" />
+              <p className="text-sm font-bold">เติมเหรียญ</p>
+            </div>
+            <h2 className="text-2xl md:text-3xl font-extrabold mb-3 tracking-tight text-slate-900">เติมเหรียญเพื่อสร้างสติ๊กเกอร์</h2>
+            <p className="text-slate-500 text-sm md:text-base font-medium max-w-xl">
+              ระบบจะพาไปหน้าชำระเงินที่ปลอดภัย และพากลับอัตโนมัติ
             </p>
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-2xl border border-white/10 bg-white/10 p-4 backdrop-blur-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/60">เหรียญคงเหลือ</p>
-                <p className="mt-2 text-3xl font-semibold">{(coinBalance ?? 0).toLocaleString()}</p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4 relative z-10">
+            {/* Card 1 */}
+            <div className="bg-slate-50 rounded-2xl p-5 border border-slate-100 flex flex-col justify-between">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="bg-blue-100 text-blue-600 rounded-full w-9 h-9 flex items-center justify-center">
+                  <WalletIcon className="w-4 h-4 md:w-5 md:h-5" />
+                </div>
+                <p className="text-slate-700 text-sm font-bold">เหรียญของคุณ</p>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 p-4 backdrop-blur-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/60">ช่องทางชำระ</p>
-                <p className="mt-2 text-sm font-medium text-white/90">Card, PromptPay, Mobile Banking</p>
+              <p className="text-3xl font-extrabold text-slate-900">{currentCoins} <span className="text-sm font-semibold text-slate-500">เหรียญ</span></p>
+            </div>
+            
+            {/* Card 2 */}
+            <div className="bg-emerald-50/50 rounded-2xl p-5 border border-emerald-50 flex flex-col justify-between">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="bg-emerald-100 text-emerald-600 rounded-full w-9 h-9 flex items-center justify-center">
+                  <CreditCardIcon className="w-4 h-4 md:w-5 md:h-5" />
+                </div>
+                <p className="text-slate-700 text-sm font-bold">ช่องทางชำระเงิน</p>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 p-4 backdrop-blur-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/60">เครดิตเข้าเมื่อ</p>
-                <p className="mt-2 text-sm font-medium text-white/90">เมื่อระบบยืนยันการชำระเงินสำเร็จ</p>
+              <p className="text-sm font-bold leading-relaxed text-slate-600">บัตร / PromptPay,<br />Mobile Banking</p>
+            </div>
+
+            {/* Card 3 */}
+            <div className="bg-purple-50/50 rounded-2xl p-5 border border-purple-50 flex flex-col justify-between">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="bg-purple-100 text-purple-600 rounded-full w-9 h-9 flex items-center justify-center">
+                  <ClockIcon className="w-4 h-4 md:w-5 md:h-5" />
+                </div>
+                <p className="text-slate-700 text-sm font-bold">เหรียญเข้าเมื่อ</p>
               </div>
+              <p className="text-sm font-bold leading-relaxed text-slate-600">ชำระเงินสำเร็จ</p>
             </div>
           </div>
 
-          <div className="px-6 py-6">
-            <div className="flex flex-wrap gap-2">
-              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                Beam Secure Checkout
-              </span>
-              <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">
-                รองรับ PromptPay และ Mobile Banking
-              </span>
-              <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
-                เติมเหรียญได้ทันทีหลังยืนยันการชำระ
-              </span>
-            </div>
+          <hr className="border-slate-100 my-2" />
 
-            <div className="mt-6 grid gap-4">
-              {PACKAGES.map((pkg) => {
-                const isSelected = pendingPackageId === pkg.id;
-                return (
-                  <button
-                    key={pkg.id}
-                    type="button"
-                    onClick={() => handleSelectPackage(pkg)}
-                    disabled={status === 'redirecting' || status === 'checking'}
-                    className={`focus-ring relative overflow-hidden rounded-[2rem] border px-5 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                      isSelected
-                        ? 'border-emerald-300 shadow-[0_18px_40px_-24px_rgba(16,185,129,0.6)]'
-                        : 'border-slate-200 hover:border-emerald-300 hover:shadow-sm'
-                    }`}
-                  >
-                    <div className={`absolute inset-x-0 top-0 h-1.5 bg-gradient-to-r ${pkg.accent}`} aria-hidden="true" />
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-lg font-semibold text-slate-900">{pkg.title}</p>
-                          {pkg.highlight && (
-                            <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">
-                              {pkg.highlight}
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-2 text-sm text-slate-600">{pkg.description}</p>
-                        <div className="mt-4 flex items-end gap-2">
-                          <span className="text-3xl font-semibold text-slate-900">{pkg.coins}</span>
-                          <span className="pb-1 text-sm font-medium text-slate-500">coins</span>
-                        </div>
-                        <p className="mt-2 text-xs font-medium text-slate-500">
-                          {coinBalance != null ? `เติมแล้วจะมีประมาณ ${coinBalance + pkg.coins} coins` : 'ยอดเหรียญจะอัปเดตหลังชำระสำเร็จ'}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-2xl font-semibold text-slate-900">{pkg.priceLabel}</p>
-                        <p className="mt-1 text-xs font-medium text-slate-500">
-                          {selectedPackageId === pkg.id && status === 'redirecting' ? 'กำลังเปิดหน้าชำระเงิน...' : 'ชำระผ่าน Beam / UOB'}
-                        </p>
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+          {/* Badges */}
+          <div className="flex flex-col sm:flex-row gap-4 sm:gap-0 justify-between text-xs md:text-sm font-bold text-slate-600">
+            <div className="flex items-center gap-2 flex-1 justify-center sm:justify-start">
+              <ShieldCheckIcon className="w-5 h-5 text-slate-500" /> ชำระเงินปลอดภัย
+            </div>
+            <div className="hidden sm:block w-px h-8 bg-slate-200"></div>
+            <div className="flex items-center gap-2 flex-1 justify-center">
+              <WalletOutlineIcon className="w-5 h-5 text-slate-500 shrink-0" /> <span className="text-center sm:text-left">รองรับ PromptPay<br className="hidden md:block" />และ Mobile Banking</span>
+            </div>
+            <div className="hidden sm:block w-px h-8 bg-slate-200"></div>
+            <div className="flex items-center gap-2 flex-1 justify-center sm:justify-end">
+              <ZapIcon className="w-5 h-5 text-slate-500" /> เหรียญเข้าอัตโนมัติทันที
             </div>
           </div>
         </section>
 
-        {pendingPackage && (
-          <section className="rounded-[2.5rem] border border-emerald-200 bg-emerald-50 p-6 shadow-sm">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-500">Payment Status</p>
-                <h2 className="mt-2 text-2xl font-semibold text-slate-900">
+        {(pendingPackage || status === 'success') && (
+          <section className="rounded-[28px] border border-emerald-200 bg-emerald-50/80 p-6 shadow-sm">
+            <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+              <div className="max-w-xl">
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-600">Payment Status</p>
+                <h3 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">
                   {status === 'success'
                     ? 'ชำระเงินสำเร็จ'
                     : status === 'failed'
                       ? 'รายการชำระเงินมีปัญหา'
-                      : 'มีรายการชำระเงินรอดำเนินการ'}
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
+                      : status === 'checking'
+                        ? 'กำลังตรวจสอบสถานะการชำระเงิน'
+                        : status === 'redirecting'
+                          ? 'กำลังเปิดหน้าชำระเงิน'
+                          : 'มีรายการชำระเงินรอดำเนินการ'}
+                </h3>
+                <p className="mt-2 text-sm font-medium text-slate-600">
                   {status === 'success'
-                    ? `เติม ${pendingPackage.coins} coins เรียบร้อยแล้ว กำลังพาคุณกลับไปหน้าสร้างสติกเกอร์`
-                    : status === 'failed'
-                      ? 'หากรายการนี้หมดอายุหรือชำระไม่สำเร็จ คุณสามารถสร้างรายการใหม่ได้ทันที'
-                      : `แพ็กเกจ ${pendingPackage.title} จำนวน ${pendingPackage.priceLabel}`}
+                    ? `เติม ${pendingPackage?.coins ?? activePackage?.coins ?? 0} เหรียญเรียบร้อยแล้ว กำลังพากลับไปหน้าสร้างสติกเกอร์`
+                    : activePackage
+                      ? `แพ็ก ${activePackage.title} จำนวน ${activePackage.price} พร้อมชำระผ่าน Beam / UOB`
+                      : 'คุณสามารถกลับไปที่หน้าชำระเงินเดิมหรือตรวจสอบสถานะรายการล่าสุดได้'}
                 </p>
+                {(status === 'pending' || status === 'checking' || status === 'redirecting') && (
+                  <div className="mt-4 rounded-2xl border border-white/80 bg-white/80 p-4 text-sm text-slate-700">
+                    <p className="font-bold text-slate-900">หากชำระเงินแล้วแต่ยอดยังไม่เข้า</p>
+                    <p className="mt-1">กดปุ่มตรวจสอบสถานะอีกครั้ง ระบบจะเช็กกับ Beam โดยตรง</p>
+                    {expiryLabel && <p className="mt-3 text-xs font-medium text-slate-500">หมดอายุ: {expiryLabel}</p>}
+                    {expiryHint && <p className="mt-1 text-xs font-medium text-slate-500">{expiryHint}</p>}
+                  </div>
+                )}
               </div>
-              <div className="rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-right">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">เหรียญที่จะได้รับ</p>
-                <p className="mt-2 text-3xl font-semibold text-slate-900">+{pendingPackage.coins}</p>
+
+              <div className="rounded-[24px] border border-emerald-200 bg-white px-5 py-4 md:min-w-56">
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">เหรียญที่จะได้รับ</p>
+                <p className="mt-2 text-3xl font-extrabold text-slate-900">
+                  +{pendingPackage?.coins ?? activePackage?.coins ?? 0}
+                </p>
                 {status !== 'success' && projectedCoinBalance != null && (
-                  <p className="mt-1 text-xs text-slate-500">หลังชำระจะมีประมาณ {projectedCoinBalance} coins</p>
+                  <p className="mt-2 text-xs font-medium text-slate-500">หลังชำระจะมีประมาณ {projectedCoinBalance} เหรียญ</p>
+                )}
+                {status === 'success' && (
+                  <p className="mt-2 text-xs font-medium text-emerald-700">ยอดล่าสุด {currentCoins.toLocaleString()} เหรียญ</p>
                 )}
               </div>
             </div>
 
-            {(status === 'pending' || status === 'checking') && (
-              <div className="mt-5 rounded-2xl border border-white/70 bg-white/70 p-4 text-sm text-slate-700">
-                <p className="font-semibold text-slate-900">หากชำระเงินแล้วแต่ยอดยังไม่เข้า</p>
-                <p className="mt-1">
-                  กดปุ่ม <span className="font-semibold">ตรวจสอบสถานะอีกครั้ง</span> ได้ ระบบจะเช็กกับ Beam โดยตรง
-                </p>
-                {expiryLabel && <p className="mt-3 text-xs text-slate-500">หมดอายุ: {expiryLabel}</p>}
-                {expiryHint && <p className="mt-1 text-xs text-slate-500">{expiryHint}</p>}
-              </div>
-            )}
-
-            {status === 'success' && (
-              <div className="mt-5 rounded-2xl border border-emerald-200 bg-white/80 p-4 text-sm text-slate-700">
-                <p className="font-semibold text-slate-900">ยอดเหรียญปัจจุบัน</p>
-                <p className="mt-2 text-2xl font-semibold text-emerald-700">{(coinBalance ?? 0).toLocaleString()} coins</p>
-              </div>
-            )}
-
-            <div className="mt-5 flex flex-col gap-3">
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
               {status !== 'success' ? (
                 <button
                   type="button"
                   onClick={() => handleCheckStatus()}
-                  className="focus-ring min-h-11 rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-700"
+                  disabled={!paymentLinkId || status === 'checking'}
+                  className="focus-ring min-h-12 rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {status === 'checking' ? 'กำลังตรวจสอบ...' : 'ฉันชำระเงินแล้ว ตรวจสอบสถานะอีกครั้ง'}
+                  {status === 'checking' ? 'กำลังตรวจสอบ...' : 'ฉันชำระเงินแล้ว'}
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={handleSuccessReturn}
-                  className="focus-ring min-h-11 rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-700"
+                  className="focus-ring min-h-12 rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-emerald-700"
                 >
-                  ไปหน้าสร้างสติกเกอร์ตอนนี้
+                  กลับไปหน้าสร้างสติกเกอร์
                 </button>
               )}
 
@@ -416,7 +457,7 @@ const PaymentPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleResumeCheckout}
-                  className="focus-ring min-h-11 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-semibold text-slate-700 hover:border-emerald-300"
+                  className="focus-ring min-h-12 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-bold text-slate-700 transition hover:border-emerald-300"
                 >
                   กลับไปหน้าชำระเงิน
                 </button>
@@ -426,7 +467,7 @@ const PaymentPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleResetPending}
-                  className="focus-ring min-h-11 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-semibold text-slate-700 hover:border-rose-300"
+                  className="focus-ring min-h-12 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-bold text-slate-700 transition hover:border-rose-300"
                 >
                   เริ่มรายการใหม่
                 </button>
@@ -438,14 +479,14 @@ const PaymentPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowPaymentDetails((prev) => !prev)}
-                  className="text-sm font-semibold text-slate-700 underline decoration-slate-300 underline-offset-4"
+                  className="text-sm font-bold text-slate-700 underline decoration-slate-300 underline-offset-4"
                 >
                   {showPaymentDetails ? 'ซ่อนข้อมูลอ้างอิงรายการ' : 'ดูข้อมูลอ้างอิงรายการ'}
                 </button>
                 {showPaymentDetails && (
-                  <div className="mt-3 rounded-2xl border border-emerald-200 bg-white/80 p-4 text-xs text-slate-500">
+                  <div className="mt-3 rounded-2xl border border-emerald-200 bg-white/90 p-4 text-xs text-slate-500">
                     <p>Payment Link ID</p>
-                    <p className="mt-1 break-all font-medium text-slate-700">{paymentLinkId}</p>
+                    <p className="mt-1 break-all font-semibold text-slate-700">{paymentLinkId}</p>
                     {expiryLabel && <p className="mt-3">หมดอายุ: {expiryLabel}</p>}
                   </div>
                 )}
@@ -454,12 +495,63 @@ const PaymentPage: React.FC = () => {
           </section>
         )}
 
+        {/* Packages List */}
+        <section className="flex flex-col gap-4">
+          {PACKAGES.map((pkg) => (
+            <button
+              key={pkg.id} 
+              type="button"
+              onClick={() => handleSelectPackage(pkg)}
+              disabled={status === 'redirecting' || status === 'checking'}
+              className={`group relative overflow-hidden rounded-[24px] border bg-white p-6 text-left shadow-sm transition-all ${
+                pendingPackageId === pkg.id
+                  ? 'border-emerald-300 shadow-md shadow-emerald-100/60'
+                  : 'border-slate-200 hover:border-slate-300 hover:shadow-md'
+              } disabled:cursor-not-allowed disabled:opacity-60`}
+            >
+              {/* Left colored line */}
+              <div className={`absolute top-0 left-0 bottom-0 w-1.5 ${pkg.id === 'pkg_70' ? 'bg-blue-500' : 'bg-emerald-500'}`} />
+
+              <div className="flex flex-col gap-1.5 w-full md:w-auto pl-3">
+                <div className="flex items-center gap-3">
+                  <h3 className="font-extrabold text-xl text-slate-900 group-hover:text-blue-600 transition-colors">{pkg.title}</h3>
+                  {pkg.highlight && (
+                    <span className="bg-emerald-50 text-emerald-600 text-xs px-2.5 py-1 rounded-full font-bold border border-emerald-100">
+                      {pkg.highlight}
+                    </span>
+                  )}
+                </div>
+                <p className="text-slate-500 text-sm font-medium">{pkg.subtitle}</p>
+                <div className="mt-3 flex items-baseline gap-1.5">
+                  <span className="text-3xl font-extrabold text-blue-500">{pkg.coins}</span>
+                  <span className="text-slate-500 text-sm font-bold">เหรียญ</span>
+                </div>
+                <p className="text-slate-400 text-xs font-medium">เติมแล้วจะมีประมาณ {currentCoins + pkg.coins} เหรียญ</p>
+                {selectedPackageId === pkg.id && status === 'redirecting' && (
+                  <p className="mt-3 text-xs font-bold text-blue-600">กำลังเปิดหน้าชำระเงิน...</p>
+                )}
+              </div>
+
+              <div className="mt-6 md:mt-0 flex items-center justify-between w-full md:w-auto border-t md:border-t-0 border-slate-100 pt-4 md:pt-0 gap-6">
+                <div className="flex flex-col items-start md:items-end">
+                  <div className="font-extrabold text-2xl text-slate-900">{pkg.price}</div>
+                  <div className="text-slate-400 text-xs mt-1 font-medium">{pkg.paymentMethods}</div>
+                </div>
+                <div className="w-10 h-10 rounded-full border border-slate-200 flex items-center justify-center text-slate-400 group-hover:border-blue-500 group-hover:text-blue-500 transition-colors bg-white shadow-sm">
+                  <ChevronRightIcon className="w-5 h-5" />
+                </div>
+              </div>
+            </button>
+          ))}
+        </section>
+
         {error && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800" role="alert">
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-800 shadow-sm" role="alert">
             {error}
           </div>
         )}
       </main>
+
     </PageLayout>
   );
 };
