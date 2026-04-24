@@ -685,6 +685,7 @@ class ImageProcessor:
         rgba[:, :, 3] = self._remove_pure_green_pockets(cv_img, rgba[:, :, 3])
         rgba[:, :, 3] = self._choke_alpha(rgba[:, :, 3], choke_radius=2.0, feather=0.85)
         rgba = self._degreen_edges(rgba)
+        rgba[:, :, 3] = self._cleanup_caption_baseline_fringe(rgba[:, :, 3])
 
         # 2. Crop with asymmetric padding so Thai text keeps breathing room.
         bounds = self._compute_content_bounds(rgba[:, :, 3], threshold=8)
@@ -810,6 +811,53 @@ class ImageProcessor:
         keep_factor = np.clip((distance_to_bg - trim_radius + feather) / max(feather, 1e-3), 0.0, 1.0)
         trimmed = np.clip(alpha.astype(np.float32) * keep_factor, 0.0, 255.0).astype(np.uint8)
         return trimmed
+
+    def _cleanup_caption_baseline_fringe(self, alpha: np.ndarray) -> np.ndarray:
+        """
+        Remove tiny horizontal alpha slivers that sit below the caption baseline.
+        Thai lower marks are protected by only targeting detached, very flat
+        components below the main sticker component.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        mask = (alpha > 18).astype(np.uint8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 2:
+            return alpha
+
+        component_areas = stats[1:, cv2.CC_STAT_AREA]
+        primary_label = int(np.argmax(component_areas)) + 1
+        primary_y = int(stats[primary_label, cv2.CC_STAT_TOP])
+        primary_h = int(stats[primary_label, cv2.CC_STAT_HEIGHT])
+        primary_bottom = primary_y + primary_h
+        primary_area = max(1, int(stats[primary_label, cv2.CC_STAT_AREA]))
+
+        height, width = alpha.shape
+        min_gap = max(2, int(round(height * 0.012)))
+        max_sliver_height = max(3, int(round(height * 0.024)))
+        max_area = max(90, int(round(primary_area * 0.006)))
+
+        cleaned = alpha.copy()
+        for label in range(1, num_labels):
+            if label == primary_label:
+                continue
+
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < 12:
+                continue
+
+            below_main = y >= primary_bottom + min_gap
+            flat_horizontal = h <= max_sliver_height and (w / max(1, h)) >= 4.0
+            small_enough = area <= max_area and w <= int(round(width * 0.22))
+            if below_main and flat_horizontal and small_enough:
+                cleaned[labels == label] = 0
+
+        return cleaned
 
     def _build_fallback_rgba(self, cv_img: np.ndarray) -> np.ndarray:
         """
