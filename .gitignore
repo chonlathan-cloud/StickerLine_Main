@@ -1,3 +1,8 @@
+# Environments
+.env
+.env.*
+!.env.example
+
 # Python virtual environment
 venv/
 .venv/
@@ -8,9 +13,19 @@ backend/.venv/
 __pycache__/
 *.py[cod]
 
+# Node.js
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
 # OS files
 .DS_Store
 
-# Frontend dependencies
-node_modules/
-dist/
+# Temporary files
+backend/tmp/

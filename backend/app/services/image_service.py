@@ -90,6 +90,19 @@ class ImageProcessor:
             })
         return risky
 
+    def assess_sticker_set_artifact_risk(self, sticker_pngs: List[bytes]) -> list[dict]:
+        risky: list[dict] = []
+        for index, sticker_png in enumerate(sticker_pngs):
+            metrics = self._measure_detached_artifact_risk(sticker_png)
+            if not metrics["is_risky"]:
+                continue
+            risky.append({
+                "index": index,
+                "components": metrics["components"],
+                "severity": metrics["severity"],
+            })
+        return risky
+
     def assess_subject_scale_consistency(self, sticker_pngs: List[bytes]) -> dict:
         ratios: list[float] = []
         indexed_ratios: list[tuple[int, float]] = []
@@ -265,6 +278,61 @@ class ImageProcessor:
             "margins": margins,
             "touches": touches,
             "severity": len(severe_edges) * 2 + len(risky_edges),
+        }
+
+    def _measure_detached_artifact_risk(self, sticker_png: bytes) -> dict:
+        nparr = np.frombuffer(sticker_png, np.uint8)
+        rgba = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.ndim < 3 or rgba.shape[2] < 4:
+            return {"is_risky": False, "components": [], "severity": 0}
+
+        alpha = rgba[:, :, 3]
+        mask = (alpha > 16).astype(np.uint8)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 2:
+            return {"is_risky": False, "components": [], "severity": 0}
+
+        component_areas = stats[1:, cv2.CC_STAT_AREA]
+        primary_label = int(np.argmax(component_areas)) + 1
+        primary_area = max(1, int(stats[primary_label, cv2.CC_STAT_AREA]))
+        height, width = alpha.shape
+        thin_limit = max(5, int(round(min(width, height) * 0.05)))
+        area_limit = max(96, int(round(primary_area * 0.045)))
+
+        risky_components: list[dict] = []
+        for label in range(1, num_labels):
+            if label == primary_label:
+                continue
+
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < 24:
+                continue
+
+            thin_side = min(w, h)
+            long_side = max(w, h)
+            is_sliver = thin_side <= thin_limit and (long_side / max(1, thin_side)) >= 2.4
+            is_small = area <= area_limit
+            if not (is_sliver and is_small):
+                continue
+
+            risky_components.append({
+                "bounds": {
+                    "x": x,
+                    "y": y,
+                    "width": w,
+                    "height": h,
+                },
+                "area": area,
+            })
+
+        return {
+            "is_risky": bool(risky_components),
+            "components": risky_components,
+            "severity": len(risky_components),
         }
 
     def _equal_edges(self, size: int, segments: int) -> np.ndarray:
@@ -617,6 +685,7 @@ class ImageProcessor:
         rgba[:, :, 3] = self._remove_pure_green_pockets(cv_img, rgba[:, :, 3])
         rgba[:, :, 3] = self._choke_alpha(rgba[:, :, 3], choke_radius=2.0, feather=0.85)
         rgba = self._degreen_edges(rgba)
+        rgba[:, :, 3] = self._cleanup_caption_baseline_fringe(rgba[:, :, 3])
 
         # 2. Crop with asymmetric padding so Thai text keeps breathing room.
         bounds = self._compute_content_bounds(rgba[:, :, 3], threshold=8)
@@ -742,6 +811,53 @@ class ImageProcessor:
         keep_factor = np.clip((distance_to_bg - trim_radius + feather) / max(feather, 1e-3), 0.0, 1.0)
         trimmed = np.clip(alpha.astype(np.float32) * keep_factor, 0.0, 255.0).astype(np.uint8)
         return trimmed
+
+    def _cleanup_caption_baseline_fringe(self, alpha: np.ndarray) -> np.ndarray:
+        """
+        Remove tiny horizontal alpha slivers that sit below the caption baseline.
+        Thai lower marks are protected by only targeting detached, very flat
+        components below the main sticker component.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        mask = (alpha > 18).astype(np.uint8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 2:
+            return alpha
+
+        component_areas = stats[1:, cv2.CC_STAT_AREA]
+        primary_label = int(np.argmax(component_areas)) + 1
+        primary_y = int(stats[primary_label, cv2.CC_STAT_TOP])
+        primary_h = int(stats[primary_label, cv2.CC_STAT_HEIGHT])
+        primary_bottom = primary_y + primary_h
+        primary_area = max(1, int(stats[primary_label, cv2.CC_STAT_AREA]))
+
+        height, width = alpha.shape
+        min_gap = max(2, int(round(height * 0.012)))
+        max_sliver_height = max(3, int(round(height * 0.024)))
+        max_area = max(90, int(round(primary_area * 0.006)))
+
+        cleaned = alpha.copy()
+        for label in range(1, num_labels):
+            if label == primary_label:
+                continue
+
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < 12:
+                continue
+
+            below_main = y >= primary_bottom + min_gap
+            flat_horizontal = h <= max_sliver_height and (w / max(1, h)) >= 4.0
+            small_enough = area <= max_area and w <= int(round(width * 0.22))
+            if below_main and flat_horizontal and small_enough:
+                cleaned[labels == label] = 0
+
+        return cleaned
 
     def _build_fallback_rgba(self, cv_img: np.ndarray) -> np.ndarray:
         """
@@ -924,6 +1040,7 @@ class ImageProcessor:
         py = int(stats[primary_label, cv2.CC_STAT_TOP])
         pw = int(stats[primary_label, cv2.CC_STAT_WIDTH])
         ph = int(stats[primary_label, cv2.CC_STAT_HEIGHT])
+        primary_area = int(stats[primary_label, cv2.CC_STAT_AREA])
 
         expand_x = int(round(width * 0.22))
         expand_top = int(round(height * 0.24))
@@ -943,7 +1060,9 @@ class ImageProcessor:
 
             cx = x + (w / 2.0)
             cy = y + (h / 2.0)
-            touches_hard_border = x <= 1 or y <= 1 or (x + w) >= (width - 1)
+            touches_side_or_top_border = x <= 1 or y <= 1 or (x + w) >= (width - 1)
+            touches_slice_border = touches_side_or_top_border or (y + h) >= (height - 1)
+            touches_hard_border = touches_side_or_top_border
             overlaps_primary = not (
                 (x + w) < primary_left
                 or x > primary_right
@@ -967,6 +1086,22 @@ class ImageProcessor:
                 primary_left <= cx <= primary_right
                 and primary_top <= cy <= primary_bottom
             )
+
+            if core_bounds is not None and label != primary_label:
+                cx1, cy1, cx2, cy2 = core_bounds
+                outside_core = (x + w) <= cx1 or x >= cx2 or (y + h) <= cy1 or y >= cy2
+                edge_sliver_area_limit = max(
+                    prominent_area,
+                    int(round(primary_area * 0.055)),
+                )
+                edge_sliver_thin_limit = max(4, int(round(min(width, height) * 0.065)))
+                edge_sliver = (
+                    touches_side_or_top_border
+                    and area <= edge_sliver_area_limit
+                    and min(w, h) <= edge_sliver_thin_limit
+                )
+                if (outside_core and touches_slice_border) or edge_sliver:
+                    continue
 
             if core_bounds is not None:
                 cx1, cy1, cx2, cy2 = core_bounds

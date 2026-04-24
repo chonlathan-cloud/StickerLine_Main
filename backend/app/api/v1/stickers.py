@@ -136,6 +136,7 @@ async def _process_job(
                 sticker_images = image_processor.process_sticker_grid(grid_bytes)
                 sticker_count = len(sticker_images)
                 edge_risks = image_processor.assess_sticker_set_edge_risk(sticker_images)
+                artifact_risks = image_processor.assess_sticker_set_artifact_risk(sticker_images)
                 scale_consistency = image_processor.assess_subject_scale_consistency(sticker_images)
                 quality_warnings: list[dict] = []
                 if sticker_count != TARGET_STICKER_COUNT:
@@ -151,6 +152,11 @@ async def _process_job(
                         "type": "edge_touch_risk",
                         "details": edge_risks,
                     })
+                if artifact_risks:
+                    quality_warnings.append({
+                        "type": "detached_artifact_risk",
+                        "details": artifact_risks,
+                    })
                 if scale_consistency["is_inconsistent"]:
                     quality_warnings.append({
                         "type": "scale_inconsistency",
@@ -162,11 +168,13 @@ async def _process_job(
                     "sticker_images": sticker_images,
                     "sticker_count": sticker_count,
                     "edge_risks": edge_risks,
+                    "artifact_risks": artifact_risks,
                     "scale_consistency": scale_consistency,
                     "quality_warnings": quality_warnings,
                     "risk_score": (
                         abs(TARGET_STICKER_COUNT - sticker_count) * 1000
                         + sum(int(item.get("severity", 0)) for item in edge_risks)
+                        + (sum(int(item.get("severity", 0)) for item in artifact_risks) * 50)
                         + int(round(scale_consistency["std_ratio"] * 1000))
                         + (len(scale_consistency["outliers"]) * 10)
                     ),
@@ -177,12 +185,18 @@ async def _process_job(
                     or candidate["risk_score"] < best_candidate["risk_score"]
                     or (
                         candidate["risk_score"] == best_candidate["risk_score"]
-                        and len(candidate["edge_risks"]) < len(best_candidate["edge_risks"])
+                        and (len(candidate["edge_risks"]) + len(candidate["artifact_risks"]))
+                        < (len(best_candidate["edge_risks"]) + len(best_candidate["artifact_risks"]))
                     )
                 ):
                     best_candidate = candidate
 
-                if sticker_count == TARGET_STICKER_COUNT and not edge_risks and not scale_consistency["is_inconsistent"]:
+                if (
+                    sticker_count == TARGET_STICKER_COUNT
+                    and not edge_risks
+                    and not artifact_risks
+                    and not scale_consistency["is_inconsistent"]
+                ):
                     break
 
                 last_quality_warnings = quality_warnings

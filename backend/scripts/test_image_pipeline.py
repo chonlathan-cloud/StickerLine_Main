@@ -117,6 +117,7 @@ def main() -> int:
         rows=args.rows,
     )
     edge_risks = processor.assess_sticker_set_edge_risk(outputs)
+    artifact_risks = processor.assess_sticker_set_artifact_risk(outputs)
 
     print(f"Generated {len(outputs)} sticker(s)")
     for index, png_bytes in enumerate(outputs):
@@ -133,6 +134,16 @@ def main() -> int:
             )
     else:
         print("Edge-touch risk: none detected")
+
+    if artifact_risks:
+        print("Detached artifact risk detected:")
+        for risk in artifact_risks:
+            print(
+                f"  - sticker_{risk['index']:02d}: severity={risk['severity']} "
+                f"components={risk['components']}"
+            )
+    else:
+        print("Detached artifact risk: none detected")
 
     print("Done")
     return 0
