@@ -1,7 +1,7 @@
 # Environments
 .env
 .env.*
-!.env.example
+
 
 # Python virtual environment
 venv/
