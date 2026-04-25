@@ -38,6 +38,15 @@ interface CurrentGenerationPayload {
 
 const isSupportedStickerCount = (count: number) => ALLOWED_STICKER_COUNTS.has(count);
 
+const buildSaveToPhotosBatchId = () => {
+  const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
+  const randomSuffix = Math.random().toString(36).slice(2, 6);
+  return `${timestamp}-${randomSuffix}`;
+};
+
+const buildStickerPngFileName = (index: number, batchId: string) =>
+  `sticker-${batchId}-${String(index + 1).padStart(2, '0')}.png`;
+
 const STYLE_OPTIONS: Array<{
   value: StickerStyle;
   label: '2D' | '3D';
@@ -468,10 +477,11 @@ const GeneratePage: React.FC = () => {
       setIsSharingToPhotos(true);
       setError(null);
 
+      const saveBatchId = buildSaveToPhotosBatchId();
       stickers = await Promise.all(
         stickerSlots.map(async (_slot, index) => {
           const blob = await downloadCurrentStickerForShare(userId, index);
-          const fileName = `sticker-${String(index + 1).padStart(2, '0')}.png`;
+          const fileName = buildStickerPngFileName(index, saveBatchId);
           return {
             blob,
             fileName,
