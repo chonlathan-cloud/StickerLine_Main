@@ -656,25 +656,24 @@ const GeneratePage: React.FC = () => {
   return (
     <PageLayout isOnline={isOnline}>
       <main id="main-content" className="mx-auto flex w-full max-w-md flex-col gap-3 px-4 pb-6 pt-3 sm:max-w-xl" aria-busy={loading}>
-        <section className="flex flex-wrap items-center justify-between gap-4 rounded-[3.5rem] border border-slate-100 border-b-[6px] border-b-slate-200/50 bg-white px-10 py-8 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.08)]">
-          <div className="flex flex-col gap-2">
-            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-slate-400">Your Balance</p>
-            <div className="flex items-center gap-3">
-              {/* Detailed 3D Coin Icon */}
-              <div className="relative flex h-12 w-12 items-center justify-center shrink-0">
+        <section className="flex flex-row items-center justify-between gap-3 rounded-[2.25rem] sm:rounded-[3.5rem] border border-slate-100 border-b-[6px] border-b-slate-200/50 bg-white px-5 py-5 sm:px-10 sm:py-8 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.06)]">
+          <div className="flex flex-col gap-1 sm:gap-2 min-w-0">
+            <p className="text-[10px] sm:text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Your Balance</p>
+            <div className="flex items-center gap-2 sm:gap-3">
+              <div className="relative flex h-9 w-9 sm:h-12 sm:w-12 items-center justify-center shrink-0">
                 <div className="absolute inset-0 rounded-full bg-[#fbc02d] shadow-md" />
-                <div className="absolute inset-[3px] rounded-full bg-gradient-to-b from-[#ffeb3b] to-[#f9a825] shadow-[inset_0_2px_4px_rgba(255,255,255,0.6)]" />
-                <div className="absolute inset-[18%] rounded-full border-2 border-[#fbc02d]/20" />
-                <span className="relative z-10 text-2xl font-black text-[#9a7b0c] drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]">C</span>
+                <div className="absolute inset-[2px] rounded-full bg-gradient-to-b from-[#ffeb3b] to-[#f9a825] shadow-[inset_0_1.5px_3px_rgba(255,255,255,0.6)]" />
+                <div className="absolute inset-[18%] rounded-full border border-[#fbc02d]/20" />
+                <span className="relative z-10 text-lg sm:text-2xl font-black text-[#9a7b0c] drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]">C</span>
               </div>
-              <p className="text-3xl font-extrabold tracking-tight text-slate-800">
-                {(coinBalance ?? 0).toLocaleString()} <span className="text-xl font-bold text-slate-800">Coins</span>
+              <p className="text-xl sm:text-3xl font-extrabold tracking-tight text-slate-800 whitespace-nowrap">
+                {(coinBalance ?? 0).toLocaleString()} <span className="text-sm sm:text-xl font-bold text-slate-800">Coins</span>
               </p>
             </div>
           </div>
           <Link
             to="/payment"
-            className="focus-ring flex min-h-16 items-center rounded-full bg-[#10b981] px-10 py-2 text-xl font-bold text-white shadow-[0_10px_25px_-5px_rgba(16,185,129,0.4)] transition-all hover:bg-[#059669] active:scale-95"
+            className="focus-ring flex shrink-0 min-h-[3rem] sm:min-h-[4rem] items-center rounded-full bg-[#10b981] px-6 sm:px-10 py-2 text-sm sm:text-xl font-bold text-white shadow-[0_8px_20px_-4px_rgba(16,185,129,0.4)] transition-all hover:bg-[#059669] active:scale-95 whitespace-nowrap"
           >
             เติมเงิน
           </Link>
