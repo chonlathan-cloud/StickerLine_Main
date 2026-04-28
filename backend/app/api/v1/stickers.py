@@ -7,6 +7,7 @@ from io import BytesIO
 import zipfile
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from pydantic import BaseModel
 from app.models.sticker import StickerGenerateRequest
 from app.api.deps import get_line_profile, assert_user_match
@@ -102,11 +103,72 @@ def _serialize_extra_picks(extra_picks: list[dict], storage_client: StorageClien
     serialized = []
     for pick in sorted([p for p in extra_picks if isinstance(p, dict)], key=_extract_slot_index):
         blob_name = pick.get("blob_name")
+        preview_blob_name = pick.get("preview_blob_name")
         serialized.append({
             "index": _extract_slot_index(pick),
             "url": storage_client.generate_signed_url(blob_name) if unlocked and blob_name else None,
+            "preview_url": storage_client.generate_signed_url(preview_blob_name) if preview_blob_name else None,
         })
     return serialized
+
+def _build_extra_pick_preview(sticker_bytes: bytes, slot_index: int) -> bytes:
+    with Image.open(BytesIO(sticker_bytes)) as src:
+        base = src.convert("RGBA")
+
+    canvas = Image.new("RGBA", base.size, (246, 249, 252, 255))
+
+    sticker_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
+    sticker_layer.alpha_composite(base)
+    sticker_layer = sticker_layer.filter(ImageFilter.GaussianBlur(radius=4))
+    sticker_layer = ImageEnhance.Color(sticker_layer).enhance(0.7)
+    sticker_layer = ImageEnhance.Brightness(sticker_layer).enhance(0.96)
+    sticker_layer = ImageEnhance.Contrast(sticker_layer).enhance(0.96)
+
+    canvas.alpha_composite(sticker_layer)
+
+    overlay = Image.new("RGBA", base.size, (15, 23, 42, 34))
+    canvas.alpha_composite(overlay)
+
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+    width, height = canvas.size
+
+    watermark_text = "PREVIEW"
+    step_x = max(88, width // 2)
+    step_y = max(88, height // 2)
+    for x in range(-width // 3, width + step_x, step_x):
+        for y in range(-height // 3, height + step_y, step_y):
+            draw.text(
+                (x, y),
+                watermark_text,
+                fill=(255, 255, 255, 34),
+                font=font,
+                anchor="mm",
+            )
+
+    slot_label = f"Slot {slot_index + 1}"
+    slot_bbox = draw.textbbox((0, 0), slot_label, font=font)
+    label_width = slot_bbox[2] - slot_bbox[0]
+    label_height = slot_bbox[3] - slot_bbox[1]
+    badge_padding_x = 10
+    badge_padding_y = 7
+    badge_box = (
+        12,
+        12,
+        12 + label_width + badge_padding_x * 2,
+        12 + label_height + badge_padding_y * 2,
+    )
+    draw.rounded_rectangle(badge_box, radius=18, fill=(30, 41, 59, 215))
+    draw.text(
+        (badge_box[0] + badge_padding_x, badge_box[1] + badge_padding_y - 1),
+        slot_label,
+        fill=(255, 255, 255, 235),
+        font=font,
+    )
+
+    output = BytesIO()
+    canvas.convert("RGB").save(output, format="JPEG", quality=72, optimize=True)
+    return output.getvalue()
 
 async def _process_job(
     job_id: str,
@@ -295,9 +357,17 @@ async def _process_job(
                 result_slots.append({"index": index, "url": url, "locked": locked})
                 persisted_slots.append({"index": index, "blob_name": blob_name, "locked": locked})
                 if use_existing:
+                    preview_blob_name = f"users/{request.user_id}/jobs/{job_id}/extra-preview-{index}.jpg"
+                    preview_bytes = _build_extra_pick_preview(sticker_images[index], index)
+                    storage_client.upload_file(
+                        file_bytes=preview_bytes,
+                        destination_blob_name=preview_blob_name,
+                        content_type="image/jpeg",
+                    )
                     persisted_extra_picks.append({
                         "index": index,
                         "blob_name": output_blobs[index],
+                        "preview_blob_name": preview_blob_name,
                     })
 
             await user_service.set_current_generation_state(

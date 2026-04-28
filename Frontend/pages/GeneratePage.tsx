@@ -34,6 +34,7 @@ interface ExtraPickSlot {
   id: string;
   index: number;
   url: string | null;
+  previewUrl: string | null;
 }
 
 interface CurrentGenerationPayload {
@@ -141,6 +142,7 @@ const GeneratePage: React.FC = () => {
         id: `${data.job_id ?? now}-extra-${index}`,
         index: pick.index,
         url: pick.url ?? null,
+        previewUrl: pick.preview_url ?? null,
       })),
     );
     setIsExtraPicksUnlocked(Boolean(data.extra_picks_unlocked));
@@ -1121,9 +1123,23 @@ const GeneratePage: React.FC = () => {
                           alt={`Extra pick for sticker ${slot.index + 1}`}
                           className="aspect-square w-full rounded-xl bg-white object-contain"
                         />
+                      ) : slot.previewUrl ? (
+                        <div className="relative">
+                          <img
+                            src={slot.previewUrl}
+                            alt={`Locked preview for extra pick ${slot.index + 1}`}
+                            className="aspect-square w-full rounded-xl bg-slate-100 object-contain"
+                          />
+                          <div className="absolute inset-0 rounded-xl bg-gradient-to-t from-slate-950/12 via-transparent to-white/5" />
+                          <div className="pointer-events-none absolute inset-x-4 bottom-3 flex justify-center">
+                            <span className="rounded-full border border-white/35 bg-slate-950/38 px-3 py-1.5 text-xs font-semibold text-white shadow-lg backdrop-blur-sm">
+                              Preview locked
+                            </span>
+                          </div>
+                        </div>
                       ) : (
                         <div className="flex aspect-square w-full items-center justify-center rounded-xl bg-slate-100 text-center text-sm font-medium text-slate-500">
-                          Unlock 1 Coin
+                          Preview unavailable
                         </div>
                       )}
                       <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
@@ -1152,7 +1168,7 @@ const GeneratePage: React.FC = () => {
                       <p className="text-sm text-slate-600">Coins ไม่พอสำหรับปลดล็อก Extra Picks</p>
                     ) : (
                       <p className="text-sm text-slate-600">
-                        ปลดล็อกเพื่อดูรูปจริง แล้วเลือกเฉพาะรูปที่ต้องการสลับเข้า final 16
+                        ปลดล็อกทั้งหมดด้วย 1 coin เพื่อดูรูปจริง แล้วเลือกเฉพาะรูปที่ต้องการสลับเข้า final 16
                       </p>
                     )}
                   </div>

@@ -24,7 +24,7 @@ API.interceptors.request.use((config) => {
 });
 
 export type StickerSlotResponse = { index: number; url: string; locked: boolean };
-export type ExtraPickResponse = { index: number; url: string | null };
+export type ExtraPickResponse = { index: number; url: string | null; preview_url?: string | null };
 
 //const API = axios.create({
 //  baseURL: (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080',
