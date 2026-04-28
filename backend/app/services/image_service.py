@@ -298,6 +298,16 @@ class ImageProcessor:
         height, width = alpha.shape
         thin_limit = max(5, int(round(min(width, height) * 0.05)))
         area_limit = max(96, int(round(primary_area * 0.045)))
+        significant_area = max(300, int(round(primary_area * 0.22)))
+        significant_tops = [
+            int(stats[label, cv2.CC_STAT_TOP])
+            for label in range(1, num_labels)
+            if int(stats[label, cv2.CC_STAT_AREA]) >= significant_area
+        ]
+        main_top = min(significant_tops) if significant_tops else int(stats[primary_label, cv2.CC_STAT_TOP])
+        top_gap = max(5, int(round(height * 0.025)))
+        top_height_limit = max(18, int(round(height * 0.075)))
+        top_area_limit = max(3200, int(round(primary_area * 0.10)))
 
         risky_components: list[dict] = []
         for label in range(1, num_labels):
@@ -316,7 +326,14 @@ class ImageProcessor:
             long_side = max(w, h)
             is_sliver = thin_side <= thin_limit and (long_side / max(1, thin_side)) >= 2.4
             is_small = area <= area_limit
-            if not (is_sliver and is_small):
+            is_top_fragment = (
+                y <= main_top - top_gap
+                and h <= top_height_limit
+                and area <= top_area_limit
+                and w <= int(round(width * 0.76))
+                and (w / max(1, h)) >= 2.5
+            )
+            if not ((is_sliver and is_small) or is_top_fragment):
                 continue
 
             risky_components.append({
@@ -327,6 +344,7 @@ class ImageProcessor:
                     "height": h,
                 },
                 "area": area,
+                "reason": "top_detached" if is_top_fragment else "detached_sliver",
             })
 
         return {
@@ -685,6 +703,7 @@ class ImageProcessor:
         rgba[:, :, 3] = self._remove_pure_green_pockets(cv_img, rgba[:, :, 3])
         rgba[:, :, 3] = self._choke_alpha(rgba[:, :, 3], choke_radius=2.0, feather=0.85)
         rgba = self._degreen_edges(rgba)
+        rgba[:, :, 3] = self._cleanup_top_detached_artifacts(rgba[:, :, 3])
         rgba[:, :, 3] = self._cleanup_caption_baseline_fringe(rgba[:, :, 3])
 
         # 2. Crop with asymmetric padding so Thai text keeps breathing room.
@@ -811,6 +830,51 @@ class ImageProcessor:
         keep_factor = np.clip((distance_to_bg - trim_radius + feather) / max(feather, 1e-3), 0.0, 1.0)
         trimmed = np.clip(alpha.astype(np.float32) * keep_factor, 0.0, 255.0).astype(np.uint8)
         return trimmed
+
+    def _cleanup_top_detached_artifacts(self, alpha: np.ndarray) -> np.ndarray:
+        """
+        Remove detached caption fragments that leak from the cell above. This
+        targets small components touching the top edge of the cell-local crop,
+        while preserving the primary character/text component.
+        """
+        if alpha is None or alpha.size == 0:
+            return alpha
+
+        mask = (alpha > 18).astype(np.uint8)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 2:
+            return alpha
+
+        component_areas = stats[1:, cv2.CC_STAT_AREA]
+        primary_label = int(np.argmax(component_areas)) + 1
+        primary_area = max(1, int(stats[primary_label, cv2.CC_STAT_AREA]))
+        height, width = alpha.shape
+        max_height = max(12, int(round(height * 0.08)))
+        max_area = max(1800, int(round(primary_area * 0.08)))
+        max_width = int(round(width * 0.78))
+
+        cleaned = alpha.copy()
+        for label in range(1, num_labels):
+            if label == primary_label:
+                continue
+
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+
+            touches_top = y <= 1
+            compact_top_piece = h <= max_height and area <= max_area and w <= max_width
+            if touches_top and compact_top_piece:
+                pad = 2
+                x1 = max(0, x - pad)
+                y1 = max(0, y - pad)
+                x2 = min(width, x + w + pad)
+                y2 = min(height, y + h + pad)
+                cleaned[y1:y2, x1:x2] = 0
+
+        return cleaned
 
     def _cleanup_caption_baseline_fringe(self, alpha: np.ndarray) -> np.ndarray:
         """

@@ -42,7 +42,6 @@ MIN_INSTANCES="${MIN_INSTANCES:-1}"
 
 GCS_BUCKET_NAME="${GCS_BUCKET_NAME:-}"
 LIFF_CHANNEL_ID="${LIFF_CHANNEL_ID:-}"
-<<<<<<< HEAD
 LINE_CHANNEL_SECRET="${LINE_CHANNEL_SECRET:-}"
 BEAM_BASE_URL="${BEAM_BASE_URL:-https://playground.api.beamcheckout.com}"
 BEAM_MERCHANT_ID="${BEAM_MERCHANT_ID:-}"
@@ -72,22 +71,19 @@ LINE_PROFILE_CACHE_GRACE_SECONDS="${LINE_PROFILE_CACHE_GRACE_SECONDS:-600}"
 LINE_PROFILE_REQUEST_TIMEOUT="${LINE_PROFILE_REQUEST_TIMEOUT:-10.0}"
 LINE_PROFILE_REQUEST_RETRIES="${LINE_PROFILE_REQUEST_RETRIES:-1}"
 LINE_PROFILE_RETRY_DELAY="${LINE_PROFILE_RETRY_DELAY:-0.5}"
-GENERATION_MAX_RETRIES="${GENERATION_MAX_RETRIES:-3}"
-GENERATION_RETRY_BASE_DELAY="${GENERATION_RETRY_BASE_DELAY:-2}"
+GENERATION_MAX_RETRIES="${GENERATION_MAX_RETRIES:-8}"
+GENERATION_RETRY_BASE_DELAY="${GENERATION_RETRY_BASE_DELAY:-5.0}"
 GENERATION_CONCURRENCY="${GENERATION_CONCURRENCY:-1}"
 GENERATION_COOLDOWN_SECONDS="${GENERATION_COOLDOWN_SECONDS:-30}"
 
-<<<<<<< HEAD
 required_vars=(
   GCS_BUCKET_NAME
   LIFF_CHANNEL_ID
   LINE_CHANNEL_SECRET
-  GEMINI_API_KEY
   BEAM_MERCHANT_ID
   BEAM_API_KEY
   BEAM_WEBHOOK_HMAC_KEY
   PAYMENT_REDIRECT_URL
-  PAYMENT_WEBHOOK_PUBLIC_URL
 )
 
 missing_vars=()
@@ -97,9 +93,18 @@ for var_name in "${required_vars[@]}"; do
   fi
 done
 
+provider_normalized="$(printf '%s' "${GENAI_PROVIDER}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${provider_normalized}" =~ ^(gemini_api|gemini|ai_studio|genai)$ ]] && [[ -z "${GEMINI_API_KEY}" ]]; then
+  missing_vars+=("GEMINI_API_KEY")
+fi
+
 if (( ${#missing_vars[@]} > 0 )); then
   echo "ERROR: Missing required environment variables: ${missing_vars[*]}"
   exit 1
+fi
+
+if [[ -z "${PAYMENT_WEBHOOK_PUBLIC_URL}" ]]; then
+  echo "WARNING: PAYMENT_WEBHOOK_PUBLIC_URL is empty. If Beam webhook callback uses a public URL, set it before deploy."
 fi
 
 if [[ "${PAYMENT_REDIRECT_URL}" != */payment* ]]; then
@@ -163,16 +168,6 @@ for env_key in \
   append_env_var "${env_key}"
 done
 
-=======
-if [[ -z "${GCS_BUCKET_NAME}" || -z "${LIFF_CHANNEL_ID}" ]]; then
-  echo "ERROR: GCS_BUCKET_NAME and LIFF_CHANNEL_ID are required."
-  exit 1
-fi
-
-GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
-BE_IMAGE="${REPO}/${BE_SERVICE}:${GIT_SHA}"
-
->>>>>>> c1633f65131bd38820f12b8fcfd65122c0de61ee
 echo "==> Configure Docker for Artifact Registry"
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
@@ -194,11 +189,7 @@ if [[ "${ALLOW_UNAUTH}" == "1" ]]; then
   ALLOW_FLAG="--allow-unauthenticated"
 fi
 
-<<<<<<< HEAD
 echo "==> Deploy Backend"
-=======
-echo "==> Deploy Backend (private)"
->>>>>>> c1633f65131bd38820f12b8fcfd65122c0de61ee
 gcloud run deploy "${BE_SERVICE}" \
   --project "${PROJECT_ID}" \
   --region "${REGION}" \
@@ -207,13 +198,8 @@ gcloud run deploy "${BE_SERVICE}" \
   "${ALLOW_FLAG}" \
   --memory "${MEMORY}" \
   --min-instances "${MIN_INSTANCES}" \
-<<<<<<< HEAD
   --clear-secrets \
   --env-vars-file "${TMP_ENV_VARS_FILE}"
-=======
-  --set-env-vars "PROJECT_ID=${PROJECT_ID},GCS_BUCKET_NAME=${GCS_BUCKET_NAME},LIFF_CHANNEL_ID=${LIFF_CHANNEL_ID},VERTEX_MODEL=${VERTEX_MODEL},VERTEX_LOCATION=${VERTEX_LOCATION},GENAI_PROVIDER=${GENAI_PROVIDER},GENAI_FALLBACK_PROVIDER=${GENAI_FALLBACK_PROVIDER},GENAI_FALLBACK_MAX_RETRIES=${GENAI_FALLBACK_MAX_RETRIES},GENERATION_MAX_RETRIES=${GENERATION_MAX_RETRIES},GENERATION_RETRY_BASE_DELAY=${GENERATION_RETRY_BASE_DELAY},GENERATION_CONCURRENCY=${GENERATION_CONCURRENCY},GENERATION_COOLDOWN_SECONDS=${GENERATION_COOLDOWN_SECONDS}" \
-  --set-secrets "GEMINI_API_KEY=gemini_api_key:latest,LINE_CHANNEL_SECRET=line_channel_secret:latest,OMISE_SECRET_KEY=omise_secret_key:latest,OMISE_PUBLIC_KEY=omise_public_key:latest"
->>>>>>> c1633f65131bd38820f12b8fcfd65122c0de61ee
 
 echo "==> Backend URL:"
 gcloud run services describe "${BE_SERVICE}" --project "${PROJECT_ID}" --region "${REGION}" --format 'value(status.url)'
