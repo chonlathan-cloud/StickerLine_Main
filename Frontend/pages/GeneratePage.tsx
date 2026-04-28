@@ -2,7 +2,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ExtraPickResponse, StickerSlotResponse } from '../api/client';
 import { StickerStyle, StickerSheetConfig } from '../types';
-import { downloadCurrentStickerForShare, getCurrentStickersDownloadUrl, getCurrentStickers, resetCurrentStickers, uploadImage, startGeneration, checkJobStatus } from '../api/client';
+import {
+  applyCurrentExtraPicks,
+  checkJobStatus,
+  downloadCurrentStickerForShare,
+  getCurrentStickers,
+  getCurrentStickersDownloadUrl,
+  resetCurrentStickers,
+  startGeneration,
+  unlockCurrentExtraPicks,
+  uploadImage,
+} from '../api/client';
 import { PageLayout } from '../components/PageLayout';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
@@ -82,7 +92,6 @@ const GeneratePage: React.FC = () => {
   const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
   const [generationTargetCount, setGenerationTargetCount] = useState(DEFAULT_STICKER_COUNT);
   const [isComplianceChecking, setIsComplianceChecking] = useState(false);
-  const [isPromptExpanded, setIsPromptExpanded] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [isSharingToPhotos, setIsSharingToPhotos] = useState(false);
@@ -174,20 +183,7 @@ const GeneratePage: React.FC = () => {
       if (!profile?.userId) return;
       try {
         const data = await getCurrentStickers(profile.userId);
-        const slotCount = data.result_slots?.length ?? 0;
-        if (data.status === 'ok' && data.result_slots && isSupportedStickerCount(slotCount)) {
-          const now = Date.now();
-          const slots = data.result_slots.map((slot, index) => ({
-            id: `${data.job_id ?? now}-${index}`,
-            url: slot.url,
-            locked: slot.locked,
-          }));
-          setStickerSlots(slots);
-          setTransparentImageUrl(slots[0]?.url ?? null);
-          setHasGenerated(true);
-          setJobId(data.job_id ?? null);
-          setGenerationTargetCount(slotCount);
-        }
+        hydrateCurrentGeneration(data);
       } catch {
         // Non-blocking: ignore load failures for current set
       }
@@ -305,13 +301,23 @@ const GeneratePage: React.FC = () => {
           locked: slot.locked,
         }));
 
-        setStickerSlots(slots);
-        setJobId(resolved.job_id || null);
-        setTransparentImageUrl(slots[0]?.url ?? null);
-        setHasGenerated(true);
-        finalStickerCount = resultCount;
-        setGenerationTargetCount(resultCount);
         setProcessingStep('complete');
+
+        try {
+          const currentData = await getCurrentStickers(profile.userId);
+          hydrateCurrentGeneration(currentData);
+          finalStickerCount = currentData.result_slots?.length ?? resultCount;
+        } catch {
+          // Fallback to the completed job payload when the follow-up sync fails.
+          setStickerSlots(slots);
+          setJobId(resolved.job_id || null);
+          setTransparentImageUrl(slots[0]?.url ?? null);
+          setHasGenerated(true);
+          setExtraPickSlots([]);
+          setIsExtraPicksUnlocked(false);
+          finalStickerCount = resultCount;
+          setGenerationTargetCount(resultCount);
+        }
 
         setTimeout(() => {
           const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -345,6 +351,11 @@ const GeneratePage: React.FC = () => {
           : slot
       )
     );
+    setError(null);
+  };
+
+  const setAllStickerLocks = (locked: boolean) => {
+    setStickerSlots((prev) => prev.map((slot) => ({ ...slot, locked })));
     setError(null);
   };
 
@@ -581,21 +592,35 @@ const GeneratePage: React.FC = () => {
   const isAndroid = isAndroidDevice();
   const isInLiffClient = isLiffInClient();
   const shouldResumeSaveToPhotos = shouldContinueSaveToPhotosInExternalBrowser() && !isInLiffClient;
+  const canReuseExisting = isSupportedStickerCount(currentStickerCount);
   const unlockedCount = currentStickerCount > 0 ? currentStickerCount - lockedCount : DEFAULT_STICKER_COUNT;
+  const regenerateCount = canReuseExisting ? unlockedCount : DEFAULT_STICKER_COUNT;
+  const keepCount = canReuseExisting ? lockedCount : 0;
+  const canGenerate = Boolean(config.base64Image) && isOnline && (!hasGenerated || lockedCount < currentStickerCount);
   const generateButtonLabel = loading
     ? 'Generating...'
     : hasGenerated
       ? lockedCount > 0
-        ? `Regenerate Unchecked (${unlockedCount})`
-        : 'Regenerate'
+        ? `Regenerate ${regenerateCount} Slots`
+        : 'Generate All Again'
       : 'Generate';
   const generateHelperText = loading
     ? '🔄 Generating'
     : hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount
-      ? '🔒 Locked'
+      ? 'เลือกปลดอย่างน้อย 1 รูปเพื่อเริ่มรอบถัดไป'
       : hasGenerated
-        ? '✅ Ready'
+        ? `รอบถัดไปจะคงไว้ ${keepCount} รูป และสร้างใหม่ ${regenerateCount} รูป`
         : '';
+  const selectionHeading = hasGenerated
+    ? lockedCount === 0
+      ? 'ยังไม่ได้เลือกภาพที่จะเก็บไว้'
+      : `เก็บไว้แล้ว ${keepCount} รูป`
+    : 'อัปโหลดรูปแล้วเริ่มสร้างได้ทันที';
+  const selectionSubtext = hasGenerated
+    ? lockedCount === currentStickerCount
+      ? 'ตอนนี้ทั้งชุดถูกเก็บไว้ทั้งหมด ปลดอย่างน้อย 1 รูปก่อนกด regenerate รอบใหม่'
+      : 'แตะรูปที่ชอบเพื่อเก็บ slot เดิมไว้ รอบถัดไประบบจะสร้างเฉพาะรูปที่ไม่ถูกเลือก'
+    : 'รอบแรกระบบจะสร้างครบ 16 รูป จากรูปต้นฉบับและ concept ที่กรอกไว้';
 
   const loadingHeadline =
     processingStep === 'analyzing'
@@ -761,6 +786,36 @@ const GeneratePage: React.FC = () => {
 
         <section className="relative rounded-[2.5rem] border border-slate-100 bg-white p-7 shadow-[0_15px_40px_rgba(0,0,0,0.04)]">
           <div className="space-y-6">
+            <section className="rounded-[2rem] border border-sky-100 bg-[radial-gradient(circle_at_top_left,_rgba(125,211,252,0.25),_transparent_45%),linear-gradient(135deg,_#f8fbff_0%,_#eef6ff_100%)] p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-sky-500">Regenerate Flow</p>
+                  <h2 className="mt-2 text-xl font-black tracking-tight text-slate-900">{selectionHeading}</h2>
+                  <p className="mt-2 max-w-md text-sm leading-6 text-slate-600">{selectionSubtext}</p>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/90 px-4 py-3 text-right shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Next Round</p>
+                  <p className="mt-1 text-2xl font-black tracking-tight text-slate-900">{regenerateCount}</p>
+                  <p className="text-xs font-medium text-slate-500">slots to generate</p>
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-3">
+                <div className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Keep</p>
+                  <p className="mt-1 text-2xl font-black text-emerald-600">{keepCount}</p>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Regen</p>
+                  <p className="mt-1 text-2xl font-black text-sky-600">{regenerateCount}</p>
+                </div>
+                <div className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Final Pack</p>
+                  <p className="mt-1 text-2xl font-black text-slate-900">{currentStickerCount || DEFAULT_STICKER_COUNT}</p>
+                </div>
+              </div>
+            </section>
+
             <fieldset>
               <legend className="text-2xl font-black tracking-tight text-slate-800">Style</legend>
               <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -852,9 +907,7 @@ const GeneratePage: React.FC = () => {
                 onClick={generateSheet}
                 disabled={
                   loading
-                  || !config.base64Image
-                  || !isOnline
-                  || (hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount)
+                  || !canGenerate
                 }
                 className="relative h-16 w-full overflow-hidden rounded-full font-black text-white shadow-2xl transition-all hover:scale-[1.01] hover:shadow-indigo-500/25 active:scale-95 disabled:grayscale disabled:opacity-50"
               >
@@ -905,11 +958,37 @@ const GeneratePage: React.FC = () => {
 
             {isSupportedStickerCount(currentStickerCount) ? (
               <>
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm text-slate-700">ติ๊กถูกที่สติ๊กเกอร์ที่ต้องการเก็บไว้ก่อนกด Regenerate</p>
-                  <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700">
-                    Locked {lockedCount}/{currentStickerCount}
-                  </span>
+                <div className="mt-4 rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">เลือกภาพที่ต้องการเก็บไว้ในรอบถัดไป</p>
+                      <p className="mt-1 text-sm text-slate-600">
+                        รูปที่มีเครื่องหมายถูกจะคงอยู่ที่ slot เดิม ส่วนที่ไม่ได้เลือกจะถูก generate ใหม่
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
+                      Keep {lockedCount}/{currentStickerCount}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAllStickerLocks(true)}
+                      disabled={loading || lockedCount === currentStickerCount}
+                      className="focus-ring rounded-full border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 transition hover:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Keep All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllStickerLocks(false)}
+                      disabled={loading || lockedCount === 0}
+                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-sky-400 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Generate All Again
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 sm:gap-3">
@@ -920,8 +999,8 @@ const GeneratePage: React.FC = () => {
                       onClick={() => toggleStickerLock(index)}
                       disabled={loading}
                       aria-pressed={slot.locked}
-                      aria-label={`Select sticker ${index + 1}`}
-                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-[3px] ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'
+                      aria-label={`${slot.locked ? 'Keep' : 'Regenerate'} sticker ${index + 1}`}
+                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-[3px] transition ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200 hover:border-sky-300'
                         }`}
                     >
                       <img
@@ -929,6 +1008,9 @@ const GeneratePage: React.FC = () => {
                         alt={`Sticker ${index + 1}`}
                         className="focus-ring aspect-square w-full rounded-xl bg-white object-contain"
                       />
+                      <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-black/72 px-2 py-1 text-[11px] font-semibold text-white shadow-sm">
+                        Slot {index + 1}
+                      </span>
                       {slot.locked && (
                         <>
                           <span className="pointer-events-none absolute inset-[3px] rounded-xl bg-emerald-400/20" aria-hidden="true" />
@@ -938,7 +1020,15 @@ const GeneratePage: React.FC = () => {
                           >
                             ✓
                           </span>
+                          <span className="pointer-events-none absolute bottom-2 left-2 rounded-full bg-emerald-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
+                            Keep
+                          </span>
                         </>
+                      )}
+                      {!slot.locked && (
+                        <span className="pointer-events-none absolute bottom-2 left-2 rounded-full bg-sky-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
+                          Regenerate
+                        </span>
                       )}
                     </button>
                   ))}
