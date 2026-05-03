@@ -751,6 +751,48 @@ class ImageProcessor:
         rgba[:, :, 3] = alpha
         return rgba
 
+    def _green_screen_like_mask(
+        self,
+        cv_img: np.ndarray,
+        candidate_mask: np.ndarray,
+        reference_mask: np.ndarray | None = None,
+        alpha: np.ndarray | None = None,
+        lab_threshold: float = 50.0,
+    ) -> np.ndarray:
+        """
+        Keep chroma cleanup focused on the generated screen color, not green
+        accessories that belong to the subject.
+        """
+        if candidate_mask.size == 0 or not np.any(candidate_mask):
+            return np.zeros(candidate_mask.shape, dtype=bool)
+
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(cv_img, cv2.COLOR_BGR2LAB)
+        b, g, r = cv2.split(cv_img)
+        h, s, _ = cv2.split(hsv)
+        green_excess = g.astype(np.int16) - np.maximum(r, b).astype(np.int16)
+        greenish = (h >= 25) & (h <= 105) & (s >= 25) & (g >= 55) & (green_excess >= 8)
+
+        if reference_mask is not None and reference_mask.shape == candidate_mask.shape:
+            ref_mask = reference_mask.astype(bool) & greenish
+        elif alpha is not None and alpha.shape == candidate_mask.shape:
+            ref_mask = (alpha <= 2) & greenish
+        else:
+            ref_mask = np.zeros(candidate_mask.shape, dtype=bool)
+            ref_mask[0, :] = True
+            ref_mask[-1, :] = True
+            ref_mask[:, 0] = True
+            ref_mask[:, -1] = True
+            ref_mask &= greenish
+
+        screen_bright = (g >= 185) & (s >= 70) & (green_excess >= 65)
+        if not np.any(ref_mask):
+            return candidate_mask.astype(bool) & screen_bright
+
+        lab_reference = np.median(lab[ref_mask], axis=0).astype(np.float32)
+        lab_distance = np.linalg.norm(lab.astype(np.float32) - lab_reference, axis=2)
+        return candidate_mask.astype(bool) & ((lab_distance <= lab_threshold) | screen_bright)
+
     def _remove_pure_green_pockets(self, cv_img: np.ndarray, alpha: np.ndarray) -> np.ndarray:
         """
         Remove bright chroma-green remnants that were not connected to the border.
@@ -771,6 +813,12 @@ class ImageProcessor:
             & (s >= 70)
             & (g >= 120)
             & (green_excess >= 55)
+        )
+        pure_green = self._green_screen_like_mask(
+            cv_img,
+            pure_green,
+            alpha=alpha,
+            lab_threshold=48.0,
         )
         if not np.any(pure_green):
             return alpha
@@ -943,7 +991,6 @@ class ImageProcessor:
         This avoids removing interior content that happens to be green-ish.
         """
         hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
-        lab = cv2.cvtColor(cv_img, cv2.COLOR_BGR2LAB)
         b, g, r = cv2.split(cv_img)
         h, s, _ = cv2.split(hsv)
 
@@ -958,12 +1005,14 @@ class ImageProcessor:
 
         border_green = strong_green & border_mask
         if np.any(border_green):
-            lab_pixels = lab[border_green]
-            lab_reference = np.median(lab_pixels, axis=0).astype(np.float32)
-            lab_distance = np.linalg.norm(lab.astype(np.float32) - lab_reference, axis=2)
-            candidate_mask = strong_green | ((lab_distance <= 42.0) & (g >= 60))
+            candidate_mask = self._green_screen_like_mask(
+                cv_img,
+                strong_green,
+                reference_mask=border_green,
+                lab_threshold=48.0,
+            )
         else:
-            candidate_mask = strong_green | ((g >= 90) & (green_excess >= 24))
+            candidate_mask = strong_green & (g >= 185) & (s >= 70) & (green_excess >= 65)
 
         candidate_u8 = candidate_mask.astype(np.uint8)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -1015,9 +1064,15 @@ class ImageProcessor:
             & (green_excess > 10)
             & (edge_weight > 0)
         )
+        screen_like_green = self._green_screen_like_mask(
+            cv_img,
+            suspicious_green,
+            reference_mask=bg_mask,
+            lab_threshold=50.0,
+        )
 
         penalty = np.zeros_like(alpha, dtype=np.float32)
-        penalty[suspicious_green] = np.clip(green_excess[suspicious_green] * 1.55, 0.0, 190.0) * edge_weight[suspicious_green]
+        penalty[screen_like_green] = np.clip(green_excess[screen_like_green] * 1.55, 0.0, 190.0) * edge_weight[screen_like_green]
         alpha = np.clip(alpha - penalty, 0.0, 255.0)
         alpha[bg_mask] = 0.0
 
@@ -1294,6 +1349,13 @@ class ImageProcessor:
             & (s >= 18)
             & (green_excess > 4)
         )
+        screen_like_green = self._green_screen_like_mask(
+            rgba_img[:, :, :3],
+            suspicious,
+            alpha=rgba_img[:, :, 3],
+            lab_threshold=52.0,
+        )
+        suspicious &= screen_like_green
 
         correction = np.zeros_like(g, dtype=np.float32)
         correction[suspicious] = np.clip(green_excess[suspicious] * 0.85, 0.0, 110.0) * edge_strength[suspicious]
