@@ -588,6 +588,88 @@ const GeneratePage: React.FC = () => {
     await continueSaveToPhotos(profile.userId);
   };
 
+  const handleOpenLineOA = () => {
+    const lineOaUrl = 'https://line.me/R/ti/p/@825drmlj';
+
+    if (isLiffInClient()) {
+      (window as any).liff.openWindow({ url: lineOaUrl, external: false });
+      return;
+    }
+
+    window.open(lineOaUrl, '_blank');
+  };
+
+  const handleOpenStickerMaker = () => {
+    const androidPackage = 'com.linecorp.usersticker';
+    const iosAppStoreId = '1239684967';
+    const customScheme = 'linestudio://';
+    const appStoreUrl = `https://apps.apple.com/app/id${iosAppStoreId}`;
+    const playStoreUrl = `https://play.google.com/store/apps/details?id=${androidPackage}`;
+    const liffSdk = (window as any).liff;
+
+    if (isAndroidDevice()) {
+      const intentUrl = `intent://#Intent;package=${androidPackage};scheme=linestudio;end;`;
+
+      if (isLiffInClient()) {
+        liffSdk.openWindow({ url: intentUrl, external: true });
+        return;
+      }
+
+      window.location.href = intentUrl;
+      return;
+    }
+
+    if (isIOSDevice()) {
+      let didLeavePage = false;
+      let fallbackTimer: number | null = null;
+
+      const cleanup = () => {
+        if (fallbackTimer !== null) {
+          window.clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+        }
+        window.removeEventListener('pagehide', handlePageHide);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+
+      const handlePageHide = () => {
+        didLeavePage = true;
+        cleanup();
+      };
+
+      const handleVisibilityChange = () => {
+        if (!document.hidden) return;
+        didLeavePage = true;
+        cleanup();
+      };
+
+      window.addEventListener('pagehide', handlePageHide, { once: true });
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+
+      fallbackTimer = window.setTimeout(() => {
+        cleanup();
+        if (didLeavePage || document.hidden) return;
+
+        if (isLiffInClient()) {
+          liffSdk.openWindow({ url: appStoreUrl, external: true });
+          return;
+        }
+
+        window.location.href = appStoreUrl;
+      }, 1500);
+
+      if (isLiffInClient()) {
+        liffSdk.openWindow({ url: customScheme, external: true });
+        return;
+      }
+
+      window.location.href = customScheme;
+      return;
+    }
+
+    window.open(playStoreUrl, '_blank');
+  };
+
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
   const currentStickerCount = stickerSlots.length;
   const isMobile = isMobileDevice();
@@ -1069,6 +1151,39 @@ const GeneratePage: React.FC = () => {
               >
                 {isDownloading ? 'Preparing ZIP...' : 'Download ZIP'}
               </button>
+
+              <div className="flex flex-col gap-2 border-t border-slate-100 pt-2">
+                <button
+                  type="button"
+                  onClick={handleOpenLineOA}
+                  className="focus-ring flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl bg-[#00B900] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#009900]"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-4 w-4"
+                    aria-hidden="true"
+                  >
+                    <path d="M7 10h10" />
+                    <path d="M7 14h6" />
+                    <path d="M21 11.5a8.5 8.5 0 0 1-12.61 7.48L3 21l2.02-5.39A8.5 8.5 0 1 1 21 11.5Z" />
+                  </svg>
+                  <span>ติดต่อแอดมิน @825drmlj</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleOpenStickerMaker}
+                  className="focus-ring flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl border-2 border-[#00B900] px-4 py-3 text-sm font-semibold text-[#00B900] transition-colors hover:bg-[#F2FFF2]"
+                >
+                  เปิดแอป LINE Sticker Maker
+                </button>
+              </div>
 
               {isMobile && isAndroid && isInLiffClient ? (
                 <p className="text-sm text-slate-600">
