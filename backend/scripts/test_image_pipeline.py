@@ -118,6 +118,7 @@ def main() -> int:
     )
     edge_risks = processor.assess_sticker_set_edge_risk(outputs)
     artifact_risks = processor.assess_sticker_set_artifact_risk(outputs)
+    residual_screen_risks = processor.assess_sticker_set_residual_screen_risk(outputs)
 
     print(f"Generated {len(outputs)} sticker(s)")
     for index, png_bytes in enumerate(outputs):
@@ -144,6 +145,17 @@ def main() -> int:
             )
     else:
         print("Detached artifact risk: none detected")
+
+    if residual_screen_risks:
+        print("Residual screen risk detected:")
+        for risk in residual_screen_risks:
+            print(
+                f"  - sticker_{risk['index']:02d}: severity={risk['severity']} "
+                f"screen_pixels={risk['screen_pixels']} ratio={risk['ratio']:.4f} "
+                f"bounds={risk['bounds']}"
+            )
+    else:
+        print("Residual screen risk: none detected")
 
     print("Done")
     return 0

@@ -103,6 +103,22 @@ class ImageProcessor:
             })
         return risky
 
+    def assess_sticker_set_residual_screen_risk(self, sticker_pngs: List[bytes]) -> list[dict]:
+        risky: list[dict] = []
+        for index, sticker_png in enumerate(sticker_pngs):
+            metrics = self._measure_residual_screen_risk(sticker_png)
+            if not metrics["is_risky"]:
+                continue
+            risky.append({
+                "index": index,
+                "screen_pixels": metrics["screen_pixels"],
+                "visible_pixels": metrics["visible_pixels"],
+                "ratio": metrics["ratio"],
+                "bounds": metrics["bounds"],
+                "severity": metrics["severity"],
+            })
+        return risky
+
     def assess_subject_scale_consistency(self, sticker_pngs: List[bytes]) -> dict:
         ratios: list[float] = []
         indexed_ratios: list[tuple[int, float]] = []
@@ -204,13 +220,14 @@ class ImageProcessor:
         if inset_x <= 0 and inset_y <= 0:
             return cv_img, core_bounds
 
-        green_mask = self._grid_green_mask(cv_img)
+        separator_mask = self._grid_separator_mask(cv_img)
         edge_green_threshold = 0.9
+        edge_separator_threshold = 0.62
 
-        trim_left = inset_x if inset_x > 0 and float(green_mask[:, :inset_x].mean()) >= edge_green_threshold else 0
-        trim_right = inset_x if inset_x > 0 and float(green_mask[:, width - inset_x:].mean()) >= edge_green_threshold else 0
-        trim_top = inset_y if inset_y > 0 and float(green_mask[:inset_y, :].mean()) >= edge_green_threshold else 0
-        trim_bottom = inset_y if inset_y > 0 and float(green_mask[height - inset_y:, :].mean()) >= edge_green_threshold else 0
+        trim_left = inset_x if inset_x > 0 and float(separator_mask[:, :inset_x].mean()) >= edge_separator_threshold else 0
+        trim_right = inset_x if inset_x > 0 and float(separator_mask[:, width - inset_x:].mean()) >= edge_separator_threshold else 0
+        trim_top = inset_y if inset_y > 0 and float(separator_mask[:inset_y, :].mean()) >= edge_green_threshold else 0
+        trim_bottom = inset_y if inset_y > 0 and float(separator_mask[height - inset_y:, :].mean()) >= edge_separator_threshold else 0
 
         x_start = min(trim_left, width - 1)
         y_start = min(trim_top, height - 1)
@@ -353,6 +370,40 @@ class ImageProcessor:
             "severity": len(risky_components),
         }
 
+    def _measure_residual_screen_risk(self, sticker_png: bytes) -> dict:
+        nparr = np.frombuffer(sticker_png, np.uint8)
+        rgba = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.ndim < 3 or rgba.shape[2] < 4:
+            return {
+                "is_risky": False,
+                "screen_pixels": 0,
+                "visible_pixels": 0,
+                "ratio": 0.0,
+                "bounds": None,
+                "severity": 0,
+            }
+
+        alpha = rgba[:, :, 3]
+        visible_pixels = int(np.count_nonzero(alpha > 8))
+        screen_mask = self._visible_screen_residue_mask(rgba)
+        screen_pixels = int(np.count_nonzero(screen_mask))
+        ratio = float(screen_pixels / max(visible_pixels, 1))
+        bounds = self._compute_content_bounds((screen_mask.astype(np.uint8) * 255), threshold=1)
+        min_pixels = max(28, int(round(visible_pixels * 0.0015)))
+        is_risky = screen_pixels >= min_pixels
+        severity = 0
+        if is_risky:
+            severity = 1 + int(screen_pixels >= max(90, min_pixels * 2)) + int(ratio >= 0.01)
+
+        return {
+            "is_risky": is_risky,
+            "screen_pixels": screen_pixels,
+            "visible_pixels": visible_pixels,
+            "ratio": ratio,
+            "bounds": bounds,
+            "severity": severity,
+        }
+
     def _equal_edges(self, size: int, segments: int) -> np.ndarray:
         segment_count = max(1, int(segments))
         edges = np.linspace(0, size, segment_count + 1).round().astype(int)
@@ -466,6 +517,12 @@ class ImageProcessor:
     def _grid_green_mask(self, cv_img: np.ndarray) -> np.ndarray:
         b, g, r = cv2.split(cv_img)
         return (g >= 185) & (r <= 75) & (b <= 75)
+
+    def _grid_separator_mask(self, cv_img: np.ndarray) -> np.ndarray:
+        b, g, r = cv2.split(cv_img)
+        green = self._grid_green_mask(cv_img)
+        dark_line = (r <= 32) & (g <= 42) & (b <= 42)
+        return green | dark_line
 
     def _score_gutters(self, green_mask: np.ndarray, x_edges: np.ndarray, y_edges: np.ndarray) -> float:
         height, width = green_mask.shape
@@ -705,6 +762,7 @@ class ImageProcessor:
         rgba = self._degreen_edges(rgba)
         rgba[:, :, 3] = self._cleanup_top_detached_artifacts(rgba[:, :, 3])
         rgba[:, :, 3] = self._cleanup_caption_baseline_fringe(rgba[:, :, 3])
+        rgba = self._cleanup_residual_screen_artifacts(rgba)
 
         # 2. Crop with asymmetric padding so Thai text keeps breathing room.
         bounds = self._compute_content_bounds(rgba[:, :, 3], threshold=8)
@@ -733,6 +791,7 @@ class ImageProcessor:
 
         # 4. Resize to the output canvas using premultiplied alpha to avoid dark fringes.
         canvas = self._resize_and_center_rgba(stroked, target_w=370, target_h=320, padding=18)
+        canvas = self._cleanup_residual_screen_artifacts(canvas)
 
         # Encode back to PNG bytes.
         is_success, buffer = cv2.imencode(".png", canvas)
@@ -843,6 +902,76 @@ class ImageProcessor:
             if area <= max_area or not touches_border:
                 cleaned[labels == label] = 0
 
+        return cleaned
+
+    def _visible_screen_residue_mask(self, rgba_img: np.ndarray) -> np.ndarray:
+        if rgba_img is None:
+            return np.zeros((0, 0), dtype=bool)
+        if rgba_img.size == 0 or rgba_img.ndim < 3 or rgba_img.shape[2] < 4:
+            return np.zeros(rgba_img.shape[:2], dtype=bool)
+
+        hsv = cv2.cvtColor(rgba_img[:, :, :3], cv2.COLOR_BGR2HSV)
+        b, g, r, alpha = cv2.split(rgba_img)
+        h, s, _ = cv2.split(hsv)
+        green_excess = g.astype(np.int16) - np.maximum(r, b).astype(np.int16)
+        strong_screen = (
+            (alpha > 6)
+            & (h >= 35)
+            & (h <= 90)
+            & (s >= 65)
+            & (g >= 115)
+            & (green_excess >= 80)
+            & (r <= 125)
+            & (b <= 145)
+        )
+
+        mild_screen = (
+            (alpha > 6)
+            & (h >= 35)
+            & (h <= 95)
+            & (s >= 45)
+            & (g >= 70)
+            & (green_excess >= 40)
+            & (r <= 160)
+            & (b <= 170)
+            & ~strong_screen
+        )
+        if not np.any(mild_screen):
+            return strong_screen
+
+        removable_mild = np.zeros_like(mild_screen, dtype=bool)
+        mild_u8 = mild_screen.astype(np.uint8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mild_u8, connectivity=8)
+        height, width = mild_screen.shape
+        lower_region_y = int(round(height * 0.38))
+        max_mild_area = max(120, int(round(np.count_nonzero(alpha > 8) * 0.012)))
+        for label in range(1, num_labels):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h_label = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area <= 0:
+                continue
+
+            lower_artifact = y >= lower_region_y or (y + h_label) >= int(round(height * 0.82))
+            flat_artifact = h_label <= max(10, int(round(height * 0.04))) and w >= max(8, h_label * 2)
+            small_artifact = area <= max_mild_area
+            if lower_artifact and (small_artifact or flat_artifact):
+                removable_mild[labels == label] = True
+
+        return strong_screen | removable_mild
+
+    def _cleanup_residual_screen_artifacts(self, rgba_img: np.ndarray) -> np.ndarray:
+        if rgba_img is None or rgba_img.size == 0 or rgba_img.ndim < 3 or rgba_img.shape[2] < 4:
+            return rgba_img
+
+        residue_mask = self._visible_screen_residue_mask(rgba_img)
+        if not np.any(residue_mask):
+            return rgba_img
+
+        cleaned = rgba_img.copy()
+        cleaned[:, :, 3] = np.where(residue_mask, 0, cleaned[:, :, 3]).astype(np.uint8)
         return cleaned
 
     def _choke_alpha(self, alpha: np.ndarray, choke_radius: float, feather: float) -> np.ndarray:

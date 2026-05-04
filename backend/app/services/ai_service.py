@@ -32,9 +32,13 @@ class AIService:
         "16 distinct poses, consistent character design, center-aligned characters, LINE sticker compliant style, "
         "safe margin in every cell, 2K generation quality. "
         "Add clear #00FF00 gutters between cells (12–16px). No elements may cross cell boundaries. "
+        "Do not draw black grid lines, dividers, frames, borders, panels, or boxes between cells or around the full sheet. "
+        "Cell separators must be empty pure #00FF00 gutters only. "
+        "Every cell background must be solid #00FF00 edge-to-edge with no white or colored rectangular panels behind the subject or caption. "
         "Each sticker must be fully contained inside its own cell. "
         "Keep camera distance and subject scale consistent across all 16 cells. "
-        "Each character should occupy roughly the same visual height in every cell, around 70-78% of the cell height."
+        "Each character should occupy roughly the same visual height in every cell, around 70-78% of the cell height. "
+        "Captions must sit directly over the #00FF00 background; do not add green underlines, colored bars, highlight strips, baseline blocks, or caption boxes."
     )
     DEFAULT_THAI_CAPTIONS = [
         "สวัสดี",
@@ -135,6 +139,7 @@ class AIService:
                 "- Place caption at bottom-center of each cell, clearly separated from face/hands.\n"
                 "- Typography style: Google Fonts look (Kanit ExtraBold or Noto Sans Thai Black style).\n"
                 "- Text render: solid black letters with thick white outline and soft shadow for high readability.\n"
+                "- Caption background must remain transparent over the solid #00FF00 cell background; no boxes, panels, bars, underlines, or highlight strips behind text.\n"
                 "- Keep caption large and readable in chat size, but do not clip text at cell edges.\n"
                 "- Thai glyph integrity is mandatory: all vowels/diacritics/tonemarks must remain complete and visible.\n"
                 "- Do not drop, merge, crop, or distort any Thai marks.\n"
@@ -152,6 +157,7 @@ class AIService:
                 "- Place caption at bottom-center of each cell, clearly separated from face/hands.\n"
                 "- Typography style: Google Fonts look (Kanit ExtraBold or Noto Sans Thai Black style).\n"
                 "- Text render: solid black letters with thick white outline and soft shadow for high readability.\n"
+                "- Caption background must remain transparent over the solid #00FF00 cell background; no boxes, panels, bars, underlines, or highlight strips behind text.\n"
                 "- Keep caption large and readable in chat size, but do not clip text at cell edges.\n"
                 "- Thai glyph integrity is mandatory: all vowels/diacritics/tonemarks must remain complete and visible.\n"
                 "- Do not drop, merge, crop, or distort any Thai marks.\n"
@@ -165,6 +171,7 @@ class AIService:
             "- Place caption at bottom-center of each cell, clearly separated from face/hands.\n"
             "- Typography style: Google Fonts look (Kanit ExtraBold or Noto Sans Thai Black style).\n"
             "- Text render: solid black letters with thick white outline and soft shadow for high readability.\n"
+            "- Caption background must remain transparent over the solid #00FF00 cell background; no boxes, panels, bars, underlines, or highlight strips behind text.\n"
             "- Keep caption large and readable in chat size, but do not clip text at cell edges.\n"
             "- Thai glyph integrity is mandatory: all vowels/diacritics/tonemarks must remain complete and visible "
             "(e.g. ุ ู ิ ี ึ ื ่ ้ ๊ ๋ ์).\n"
@@ -214,6 +221,7 @@ class AIService:
                 "- Keep each character at a consistent scale, targeting about 72-76% of the cell height.\n"
                 "- Hanging props near the top, wide props near the sides, and Thai captions near the bottom must stay comfortably inside the safe area.\n"
                 "- If a composition feels tight, make the character and props slightly smaller rather than filling the cell.\n"
+                "- Do not add visible grid outlines, black divider lines, or rectangular panels while correcting framing.\n"
                 if strict_cell_framing
                 else ""
             )
