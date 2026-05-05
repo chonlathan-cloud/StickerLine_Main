@@ -24,6 +24,9 @@ const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
 const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
 const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
 const DOWNLOAD_DELAY_MS = 180;
+const PROMPT_GUIDE_SEEN_KEY = 'stickerline_prompt_guide_seen';
+const PROMPT_GUIDE_EXAMPLE =
+  'ทำสติ๊กเกอร์แมวออฟฟิศ อารมณ์เหนื่อย เครียด รีบ งง ดีใจ มี laptop เอกสาร ไฟไหม้ ใช้ caption ภาษาไทยสั้น ๆ แนวแชท อ่านง่าย ตัวละครเด่นชัดทุกภาพ';
 
 interface StickerSlot {
   id: string;
@@ -100,6 +103,14 @@ const GeneratePage: React.FC = () => {
   const [isExtraPicksUnlocked, setIsExtraPicksUnlocked] = useState(false);
   const [isUnlockingExtraPicks, setIsUnlockingExtraPicks] = useState(false);
   const [isApplyingExtraPicks, setIsApplyingExtraPicks] = useState(false);
+  const [isPromptGuideOpen, setIsPromptGuideOpen] = useState(false);
+  const [hasSeenPromptGuide, setHasSeenPromptGuide] = useState(() => {
+    try {
+      return window.localStorage.getItem(PROMPT_GUIDE_SEEN_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
 
   const [config, setConfig] = useState<StickerSheetConfig>({
     base64Image: '',
@@ -670,6 +681,38 @@ const GeneratePage: React.FC = () => {
     window.open(playStoreUrl, '_blank');
   };
 
+  const markPromptGuideSeen = () => {
+    if (!hasSeenPromptGuide) {
+      setHasSeenPromptGuide(true);
+    }
+
+    try {
+      window.localStorage.setItem(PROMPT_GUIDE_SEEN_KEY, '1');
+    } catch {
+      // Non-blocking: prompt tips should still work without localStorage.
+    }
+  };
+
+  const openPromptGuide = () => {
+    setIsPromptGuideOpen(true);
+  };
+
+  const closePromptGuide = () => {
+    markPromptGuideSeen();
+    setIsPromptGuideOpen(false);
+  };
+
+  const handlePromptFocus = () => {
+    if (hasSeenPromptGuide) return;
+    markPromptGuideSeen();
+    setIsPromptGuideOpen(true);
+  };
+
+  const handleUsePromptExample = () => {
+    setConfig((prev) => ({ ...prev, extraPrompt: PROMPT_GUIDE_EXAMPLE }));
+    closePromptGuide();
+  };
+
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
   const currentStickerCount = stickerSlots.length;
   const isMobile = isMobileDevice();
@@ -959,7 +1002,30 @@ const GeneratePage: React.FC = () => {
             </fieldset>
 
             <div className="space-y-4">
-              <h3 className="text-xl font-black tracking-tight text-slate-800">Concept</h3>
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-xl font-black tracking-tight text-slate-800">Concept</h3>
+                <button
+                  type="button"
+                  onClick={openPromptGuide}
+                  className="focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 shadow-sm transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
+                >
+                  <svg
+                    className="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 17v-5" />
+                    <path d="M12 8h.01" />
+                  </svg>
+                  Prompt tips
+                </button>
+              </div>
               <div className="overflow-hidden rounded-[2rem] bg-slate-50/50 p-4 ring-1 ring-slate-100">
                 <div className="relative flex items-start gap-3">
                   <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-50 shadow-sm ring-1 ring-blue-100">
@@ -971,6 +1037,7 @@ const GeneratePage: React.FC = () => {
                     id="prompt-details"
                     value={config.extraPrompt}
                     onChange={(e) => setConfig((prev) => ({ ...prev, extraPrompt: e.target.value }))}
+                    onFocus={handlePromptFocus}
                     placeholder="Describe your image..."
                     rows={2}
                     className="w-full resize-none bg-transparent py-1 text-base font-medium text-slate-700 placeholder:text-slate-400 focus:outline-none"
@@ -1303,6 +1370,83 @@ const GeneratePage: React.FC = () => {
         )}
 
       </main>
+      {isPromptGuideOpen ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center" role="presentation">
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-950/45 backdrop-blur-[2px]"
+            onClick={closePromptGuide}
+            aria-label="Close prompt guide"
+          />
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="prompt-guide-title"
+            className="relative w-full max-w-md overflow-hidden rounded-[2rem] bg-white p-5 shadow-2xl ring-1 ring-slate-200"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-sky-500">Prompt Guide</p>
+                <h2 id="prompt-guide-title" className="mt-1 text-xl font-black tracking-tight text-slate-900">
+                  เขียน prompt ให้ตัดภาพง่ายขึ้น
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={closePromptGuide}
+                className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition-colors hover:bg-slate-200 hover:text-slate-800"
+                aria-label="Close prompt guide"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <p className="mt-3 text-sm leading-6 text-slate-600">
+              บอกไอเดียได้เต็มที่ แต่เลี่ยงการสั่ง layout หรือพื้นหลัง เพื่อให้ระบบลบฉากหลังได้สะอาดขึ้น
+            </p>
+
+            <div className="mt-4 grid gap-3">
+              <div className="rounded-2xl bg-emerald-50 p-3 ring-1 ring-emerald-100">
+                <p className="text-sm font-black text-emerald-800">ควรใส่</p>
+                <p className="mt-1 text-sm leading-6 text-emerald-900/80">
+                  ธีม, อารมณ์, props, caption สั้น ๆ และบอกให้ตัวละครเด่นชัด
+                </p>
+              </div>
+              <div className="rounded-2xl bg-rose-50 p-3 ring-1 ring-rose-100">
+                <p className="text-sm font-black text-rose-800">ควรเลี่ยง</p>
+                <p className="mt-1 text-sm leading-6 text-rose-900/80">
+                  กรอบ, ตาราง, comic panel, พื้นหลังขาว, กล่องข้อความ, แถบสีหลัง caption
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-100">
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Example</p>
+              <p className="mt-2 text-sm leading-6 text-slate-700">{PROMPT_GUIDE_EXAMPLE}</p>
+            </div>
+
+            <div className="mt-5 grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={handleUsePromptExample}
+                className="focus-ring min-h-11 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-slate-800"
+              >
+                ใช้ตัวอย่างนี้
+              </button>
+              <button
+                type="button"
+                onClick={closePromptGuide}
+                className="focus-ring min-h-11 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50"
+              >
+                เข้าใจแล้ว
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </PageLayout>
   );
 };
