@@ -228,7 +228,7 @@ class AIService:
 
             full_prompt = (
                 f"{self.TECHNICAL_TOKENS}\n"
-                "Objective: Create a professional 16-pose sticker sheet (4 columns x 4 rows) based on the uploaded photo.\n" # by = X 
+                "Objective: Create a professional 16-pose sticker sheet (4 columns by 4 rows) based on the uploaded photo.\n" # by = X 
                 f"{style_prompt}\n"
                 f"{text_instruction}\n"
                 f"{user_direction}\n"

@@ -18,7 +18,7 @@ I have provided 4 reference documents. Use them in this order of priority:
 -   **Storage:** Google Cloud Storage (GCS).
 -   **AI Engine:** Vertex AI (Gemini 1.5 Flash).
 -   **Image Processing:** `rembg`, `opencv-python-headless`, `numpy`, `Pillow`.
--   **Payment:** Omise API.
+-   **Payment:** BeambyUOB API.
 
 ## 4. CODING STANDARDS (Strictly Enforced)
 -   **Type Hinting:** All functions must have Python type hints (e.g., `def func(x: int) -> str:`).
