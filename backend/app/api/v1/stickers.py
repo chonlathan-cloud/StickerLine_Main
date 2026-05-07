@@ -13,7 +13,7 @@ from app.models.sticker import StickerGenerateRequest
 from app.api.deps import get_line_profile, assert_user_match
 from app.services.user_service import UserService
 from app.services.ai_service import AIService
-from app.services.image_service import ImageProcessor
+from app.services.image_service import ImageProcessor, UnsupportedStickerGridLayoutError
 from app.utils.storage import StorageClient
 from app.utils.firestore import get_db
 from app.core.config import settings
@@ -195,7 +195,26 @@ async def _process_job(
                     strict_cell_framing=attempt > 0,
                 )
 
-                sticker_images = image_processor.process_sticker_grid(grid_bytes)
+                try:
+                    sticker_images = image_processor.process_sticker_grid(grid_bytes)
+                except UnsupportedStickerGridLayoutError as layout_error:
+                    last_quality_warnings = [{
+                        "type": "layout_mismatch",
+                        "details": {
+                            "expected_layout": "4x4",
+                            "reason": str(layout_error),
+                        },
+                    }]
+                    logger.warning(
+                        "Rejected unsupported sticker grid for job %s on attempt %d: %s",
+                        job_id,
+                        attempt + 1,
+                        layout_error,
+                    )
+                    if attempt < 2:
+                        continue
+                    raise
+
                 sticker_count = len(sticker_images)
                 edge_risks = image_processor.assess_sticker_set_edge_risk(sticker_images)
                 artifact_risks = image_processor.assess_sticker_set_artifact_risk(sticker_images)

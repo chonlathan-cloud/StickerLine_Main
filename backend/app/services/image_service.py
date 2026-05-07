@@ -5,7 +5,25 @@ from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
+class UnsupportedStickerGridLayoutError(ValueError):
+    """Raised when the raw generated sheet is not a supported 4x4 grid."""
+
+
 class ImageProcessor:
+    TARGET_GRID_COLUMNS = 4
+    TARGET_GRID_ROWS = 4
+    MIN_SQUARE_ASPECT_RATIO = 0.88
+    MAX_SQUARE_ASPECT_RATIO = 1.14
+    UNSUPPORTED_LAYOUT_CANDIDATES = (
+        (4, 5),
+        (5, 4),
+        (5, 5),
+        (3, 5),
+        (5, 3),
+        (4, 3),
+        (3, 4),
+    )
+
     def process_sticker_grid(
         self,
         image_bytes: bytes,
@@ -25,6 +43,9 @@ class ImageProcessor:
 
             # Step A.1: Trim solid green margins (if any) to stabilize grid slicing
             grid_img = self._trim_green_margin(grid_img)
+
+            if columns is None and rows is None:
+                self._validate_supported_raw_grid(grid_img)
 
             processed_stickers = []
 
@@ -75,6 +96,51 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"Error processing sticker grid: {e}")
             raise e
+
+    def _validate_supported_raw_grid(self, cv_img: np.ndarray) -> None:
+        """
+        Reject generated sheets that are clearly not a square 4x4 grid before
+        slicing. This prevents portrait 4x5 sheets from being forced through the
+        4x4 cropper and incorrectly passing only because 16 files were produced.
+        """
+        height, width = cv_img.shape[:2]
+        aspect_ratio = width / max(height, 1)
+        if (
+            aspect_ratio < self.MIN_SQUARE_ASPECT_RATIO
+            or aspect_ratio > self.MAX_SQUARE_ASPECT_RATIO
+        ):
+            raise UnsupportedStickerGridLayoutError(
+                "Unsupported sticker grid aspect ratio "
+                f"{width}x{height} ({aspect_ratio:.3f}); expected a square 4x4 sheet."
+            )
+
+        expected_score, _, _ = self._score_detected_layout_candidate(
+            cv_img,
+            self.TARGET_GRID_COLUMNS,
+            self.TARGET_GRID_ROWS,
+        )
+        best_unsupported: tuple[int, int, float] | None = None
+
+        for candidate_columns, candidate_rows in self.UNSUPPORTED_LAYOUT_CANDIDATES:
+            score, used_detected_x, used_detected_y = self._score_detected_layout_candidate(
+                cv_img,
+                candidate_columns,
+                candidate_rows,
+            )
+            if not (used_detected_x or used_detected_y):
+                continue
+            if best_unsupported is None or score > best_unsupported[2]:
+                best_unsupported = (candidate_columns, candidate_rows, score)
+
+        if best_unsupported is None:
+            return
+
+        columns, rows, unsupported_score = best_unsupported
+        if unsupported_score > expected_score + 0.35:
+            raise UnsupportedStickerGridLayoutError(
+                "Unsupported sticker grid layout detected "
+                f"as {columns}x{rows}; expected exactly 4x4."
+            )
 
     def assess_sticker_set_edge_risk(self, sticker_pngs: List[bytes]) -> list[dict]:
         risky: list[dict] = []
@@ -472,6 +538,28 @@ class ImageProcessor:
 
     def _candidate_layouts_for_image(self, width: int, height: int) -> list[Tuple[int, int]]:
         return [(4, 4)]
+
+    def _score_detected_layout_candidate(
+        self,
+        cv_img: np.ndarray,
+        columns: int,
+        rows: int,
+    ) -> tuple[float, bool, bool]:
+        height, width = cv_img.shape[:2]
+        x_edges_detected = self._detect_grid_edges(cv_img, axis="x", expected_segments=columns)
+        y_edges_detected = self._detect_grid_edges(cv_img, axis="y", expected_segments=rows)
+        x_edges = x_edges_detected if x_edges_detected is not None else self._equal_edges(width, columns)
+        y_edges = y_edges_detected if y_edges_detected is not None else self._equal_edges(height, rows)
+        score = self._score_grid_layout(
+            cv_img,
+            columns=columns,
+            rows=rows,
+            x_edges=x_edges,
+            y_edges=y_edges,
+            used_detected_x=x_edges_detected is not None,
+            used_detected_y=y_edges_detected is not None,
+        )
+        return score, x_edges_detected is not None, y_edges_detected is not None
 
     def _score_grid_layout(
         self,

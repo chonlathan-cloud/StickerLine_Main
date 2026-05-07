@@ -31,6 +31,8 @@ class AIService:
         "no green spill on character edges, solid #00FF00 green background for transparency, 4x4 grid layout, "
         "16 distinct poses, consistent character design, center-aligned characters, LINE sticker compliant style, "
         "safe margin in every cell, 2K generation quality. "
+        "Canvas must be square 1:1 with exactly 4 columns and exactly 4 rows. "
+        "Do not create a portrait sheet, landscape sheet, 4x5 grid, 5x4 grid, fifth row, or extra stickers. "
         "Add clear #00FF00 gutters between cells (12–16px). No elements may cross cell boundaries. "
         "Do not draw black grid lines, dividers, frames, borders, panels, or boxes between cells or around the full sheet. "
         "Cell separators must be empty pure #00FF00 gutters only. "
@@ -214,7 +216,8 @@ class AIService:
             user_direction = self._build_user_direction_instruction(extra_prompt)
             framing_retry_instruction = (
                 "FRAMING RETRY RULES (CRITICAL):\n"
-                "- Output exactly 16 stickers arranged in a strict 4 columns x 4 rows grid. Do not produce 15 stickers, 5x3, or any other layout.\n"
+                "- Output exactly 16 stickers arranged in a strict 4 columns x 4 rows grid on a square 1:1 canvas.\n"
+                "- Do not produce a portrait sheet, landscape sheet, 4x5, 5x4, 5x3, 15 stickers, a fifth row, or any other layout.\n"
                 "- Keep every prop, limb, caption, and accessory fully inside its own cell with extra margin.\n"
                 "- Reserve at least 10% empty space from every cell edge; do not let any object or text touch the boundary.\n"
                 "- Maintain the same camera distance and same subject size across all cells; do not mix close-up stickers with full-body stickers.\n"
@@ -228,7 +231,7 @@ class AIService:
 
             full_prompt = (
                 f"{self.TECHNICAL_TOKENS}\n"
-                "Objective: Create a professional 16-pose sticker sheet (4 columns by 4 rows) based on the uploaded photo.\n" # by = X 
+                "Objective: Create a professional 16-pose sticker sheet (4 columns by 4 rows) on a square 1:1 canvas based on the uploaded photo.\n" # by = X 
                 f"{style_prompt}\n"
                 f"{text_instruction}\n"
                 f"{user_direction}\n"
