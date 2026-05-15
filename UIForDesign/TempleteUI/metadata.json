@@ -1,0 +1,6 @@
+{
+  "name": "Manee-son AI",
+  "description": "Your Creative Playmate for AI sticker generation and collection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

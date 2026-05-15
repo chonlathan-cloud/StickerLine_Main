@@ -1,16 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ExtraPickResponse, StickerSlotResponse } from '../api/client';
+import {
+  ExtraVaultItemResponse,
+  GenerationState,
+  PaymentProductId,
+  persistPendingPayment,
+  StickerSlotResponse,
+} from '../api/client';
 import { StickerStyle, StickerSheetConfig } from '../types';
 import {
-  applyCurrentExtraPicks,
   checkJobStatus,
+  createPayment,
   downloadCurrentStickerForShare,
+  finalizeCurrentStickerExport,
+  getCurrentExtraVault,
+  getExtraVaultDownloadUrl,
   getCurrentStickers,
   getCurrentStickersDownloadUrl,
   resetCurrentStickers,
   startGeneration,
-  unlockCurrentExtraPicks,
   uploadImage,
 } from '../api/client';
 import { PageLayout } from '../components/PageLayout';
@@ -35,9 +42,9 @@ interface StickerSlot {
 }
 interface ExtraPickSlot {
   id: string;
-  index: number;
+  replacedFromSlot: number | null;
   url: string | null;
-  previewUrl: string | null;
+  createdAt?: string | null;
 }
 
 interface CurrentGenerationPayload {
@@ -45,9 +52,11 @@ interface CurrentGenerationPayload {
   job_id?: string | null;
   sticker_count?: number;
   result_slots?: StickerSlotResponse[];
+  generation_state?: GenerationState;
+  extra_vault_count?: number;
+  extra_vault?: ExtraVaultItemResponse[];
   extra_pick_count?: number;
   extra_picks_unlocked?: boolean;
-  extra_picks?: ExtraPickResponse[];
 }
 
 const isSupportedStickerCount = (count: number) => ALLOWED_STICKER_COUNTS.has(count);
@@ -60,6 +69,18 @@ const buildSaveToPhotosBatchId = () => {
 
 const buildStickerPngFileName = (index: number, batchId: string) =>
   `sticker-${batchId}-${String(index + 1).padStart(2, '0')}.png`;
+
+const formatCountdown = (value?: string | null) => {
+  if (!value) return null;
+  const target = new Date(value).getTime();
+  if (Number.isNaN(target)) return null;
+  const diffMs = Math.max(0, target - Date.now());
+  const totalMinutes = Math.ceil(diffMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) return `${minutes} นาที`;
+  return minutes > 0 ? `${hours} ชม. ${minutes} นาที` : `${hours} ชม.`;
+};
 
 const STYLE_OPTIONS: Array<{
   value: StickerStyle;
@@ -92,17 +113,20 @@ const GeneratePage: React.FC = () => {
   const [stickerSlots, setStickerSlots] = useState<StickerSlot[]>([]);
   const [hasGenerated, setHasGenerated] = useState(false);
   const isOnline = useOnlineStatus();
-  const { profile, coinBalance, refreshProfile } = useAuth();
+  const { profile } = useAuth();
   const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
   const [generationTargetCount, setGenerationTargetCount] = useState(DEFAULT_STICKER_COUNT);
   const [isComplianceChecking, setIsComplianceChecking] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [isSharingToPhotos, setIsSharingToPhotos] = useState(false);
+  const [isCreatingPayment, setIsCreatingPayment] = useState<PaymentProductId | null>(null);
+  const [generationState, setGenerationState] = useState<GenerationState | null>(null);
   const [extraPickSlots, setExtraPickSlots] = useState<ExtraPickSlot[]>([]);
-  const [isExtraPicksUnlocked, setIsExtraPicksUnlocked] = useState(false);
-  const [isUnlockingExtraPicks, setIsUnlockingExtraPicks] = useState(false);
-  const [isApplyingExtraPicks, setIsApplyingExtraPicks] = useState(false);
+  const [selectedExtraIds, setSelectedExtraIds] = useState<string[]>([]);
+  const [isExtraVaultLoading, setIsExtraVaultLoading] = useState(false);
+  const [isExtraExporting, setIsExtraExporting] = useState(false);
+  const [clockTick, setClockTick] = useState(0);
   const [isPromptGuideOpen, setIsPromptGuideOpen] = useState(false);
   const [hasSeenPromptGuide, setHasSeenPromptGuide] = useState(() => {
     try {
@@ -127,7 +151,11 @@ const GeneratePage: React.FC = () => {
     const now = Date.now();
     const resultSlots = data.result_slots ?? [];
     const stickerCount = resultSlots.length;
-    const extraPicks = data.extra_picks ?? [];
+    const extraVault = data.extra_vault ?? [];
+
+    if (data.generation_state) {
+      setGenerationState(data.generation_state);
+    }
 
     if (data.status === 'ok' && isSupportedStickerCount(stickerCount)) {
       const slots = resultSlots.map((slot, index) => ({
@@ -149,14 +177,14 @@ const GeneratePage: React.FC = () => {
     }
 
     setExtraPickSlots(
-      extraPicks.map((pick, index) => ({
-        id: `${data.job_id ?? now}-extra-${index}`,
-        index: pick.index,
-        url: pick.url ?? null,
-        previewUrl: pick.preview_url ?? null,
+      extraVault.map((item, index) => ({
+        id: item.id || `${data.job_id ?? now}-extra-${index}`,
+        replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
+        url: item.url ?? null,
+        createdAt: item.created_at ?? null,
       })),
     );
-    setIsExtraPicksUnlocked(Boolean(data.extra_picks_unlocked));
+    setSelectedExtraIds((prev) => prev.filter((id) => extraVault.some((item) => item.id === id)));
   };
 
   useEffect(() => {
@@ -205,6 +233,11 @@ const GeneratePage: React.FC = () => {
     loadCurrentSet();
   }, [profile?.userId]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -222,7 +255,8 @@ const GeneratePage: React.FC = () => {
         setTransparentImageUrl(null);
         setStickerSlots([]);
         setExtraPickSlots([]);
-        setIsExtraPicksUnlocked(false);
+        setSelectedExtraIds([]);
+        setGenerationState(null);
         setJobId(null);
         setGenerationTargetCount(DEFAULT_STICKER_COUNT);
         setError(null);
@@ -277,6 +311,9 @@ const GeneratePage: React.FC = () => {
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const statusResp = await checkJobStatus(jobId);
         if (statusResp.status === 'completed' && statusResp.result_slots) {
+          if (statusResp.generation_state) {
+            setGenerationState(statusResp.generation_state);
+          }
           return statusResp;
         }
         if (statusResp.status === 'failed') {
@@ -299,6 +336,9 @@ const GeneratePage: React.FC = () => {
         .filter((index): index is number => index !== null);
 
       const jobResp = await startGeneration(profile.userId, gcsUri, config.style, config.extraPrompt, lockedIndices);
+      if (jobResp.generation_state) {
+        setGenerationState(jobResp.generation_state);
+      }
 
       // The current backend returns result_urls directly (synchronous flow)
       let resolved = jobResp;
@@ -327,7 +367,7 @@ const GeneratePage: React.FC = () => {
           setTransparentImageUrl(slots[0]?.url ?? null);
           setHasGenerated(true);
           setExtraPickSlots([]);
-          setIsExtraPicksUnlocked(false);
+          setSelectedExtraIds([]);
           finalStickerCount = resultCount;
           setGenerationTargetCount(resultCount);
         }
@@ -345,9 +385,15 @@ const GeneratePage: React.FC = () => {
     } catch (err: any) {
       console.error('Generation Error:', err);
       const backendDetail = err?.response?.data?.detail;
-      const message = typeof backendDetail === 'string' 
-        ? backendDetail 
-        : (backendDetail ? JSON.stringify(backendDetail) : (err.response?.data ? JSON.stringify(err.response.data) : err.message || 'Error connecting to server'));
+      if (backendDetail?.generation_state) {
+        setGenerationState(backendDetail.generation_state);
+      }
+      const message = backendDetail?.generation_state?.warning?.message
+        || (backendDetail?.error_code === 'generation_limit_reached'
+          ? 'ครบโควต้าทดลองแล้ว ปลดล็อก 199 บาทเพื่อบันทึกสติกเกอร์ชุดนี้'
+          : typeof backendDetail === 'string'
+            ? backendDetail
+            : (backendDetail ? JSON.stringify(backendDetail) : (err.response?.data ? JSON.stringify(err.response.data) : err.message || 'Error connecting to server')));
       setError(message);
     } finally {
       setLoading(false);
@@ -372,42 +418,104 @@ const GeneratePage: React.FC = () => {
     setError(null);
   };
 
-  const handleUnlockExtraPicks = async () => {
-    if (!profile?.userId || extraPickSlots.length === 0) {
-      setError('ไม่มี Extra Picks ให้ปลดล็อกในรอบนี้');
+  const beginPayment = async (productId: PaymentProductId, selectedIds: string[] = []) => {
+    if (!profile?.userId) {
+      setError('Please log in with LINE before payment.');
       return;
     }
 
     try {
-      setIsUnlockingExtraPicks(true);
+      setIsCreatingPayment(productId);
       setError(null);
-      const data = await unlockCurrentExtraPicks(profile.userId);
-      hydrateCurrentGeneration(data);
-      await refreshProfile();
+      const result = await createPayment(profile.userId, productId, {
+        cycleId: generationState?.cycle_id,
+        selectedExtraIds: selectedIds,
+      });
+      persistPendingPayment(
+        result.payment_link_id,
+        result.checkout_url,
+        result.product_id,
+        result.expires_at,
+        result.selected_extra_ids ?? selectedIds,
+      );
+      window.location.assign(result.checkout_url);
     } catch (err: any) {
-      const message = err?.response?.data?.detail || err?.message || 'Failed to unlock Extra Picks.';
+      const message = err?.response?.data?.detail || err?.message || 'ไม่สามารถสร้างลิงก์ชำระเงินได้';
       setError(message);
     } finally {
-      setIsUnlockingExtraPicks(false);
+      setIsCreatingPayment(null);
     }
   };
 
-  const handleUseExtraPick = async (index: number) => {
-    if (!profile?.userId) {
-      setError('กรุณาเข้าสู่ระบบก่อนใช้งาน Extra Picks');
+  const refreshExtraVault = async () => {
+    if (!profile?.userId) return;
+    try {
+      setIsExtraVaultLoading(true);
+      const data = await getCurrentExtraVault(profile.userId);
+      setGenerationState(data.generation_state);
+      setExtraPickSlots(
+        (data.extra_vault ?? []).map((item) => ({
+          id: item.id,
+          replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
+          url: item.url,
+          createdAt: item.created_at ?? null,
+        })),
+      );
+      setSelectedExtraIds((prev) => prev.filter((id) => data.extra_vault.some((item) => item.id === id)));
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || err?.message || 'Failed to load Extra Vault.');
+    } finally {
+      setIsExtraVaultLoading(false);
+    }
+  };
+
+  const toggleExtraSelection = (id: string) => {
+    setSelectedExtraIds((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((selectedId) => selectedId !== id);
+      }
+      if (prev.length >= 16) {
+        setError('เลือก Extra ได้สูงสุด 16 รูป');
+        return prev;
+      }
+      setError(null);
+      return [...prev, id];
+    });
+  };
+
+  const handleBuyExtraPack = async () => {
+    if (selectedExtraIds.length === 0) {
+      setError('เลือก Extra อย่างน้อย 1 รูปก่อนซื้อแพ็ก 99 บาท');
       return;
     }
+    await beginPayment('extra_pack_99', selectedExtraIds);
+  };
 
+  const handleDownloadExtraVault = async () => {
+    if (!profile?.userId) return;
+    const idsToExport = generationState?.extra_pack_selected_ids?.length
+      ? generationState.extra_pack_selected_ids
+      : selectedExtraIds;
+    if (idsToExport.length === 0) {
+      setError('เลือก Extra อย่างน้อย 1 รูปก่อน export');
+      return;
+    }
     try {
-      setIsApplyingExtraPicks(true);
+      setIsExtraExporting(true);
       setError(null);
-      const data = await applyCurrentExtraPicks(profile.userId, [index]);
-      hydrateCurrentGeneration(data);
+      const { url, generation_state } = await getExtraVaultDownloadUrl(profile.userId, idsToExport);
+      setGenerationState(generation_state);
+      openDownloadUrl(url);
     } catch (err: any) {
-      const message = err?.response?.data?.detail || err?.message || 'Failed to move extra pick into the final pack.';
-      setError(message);
+      const detail = err?.response?.data?.detail;
+      if (detail?.generation_state) {
+        setGenerationState(detail.generation_state);
+      }
+      setError(detail?.error_code === 'payment_required'
+        ? 'กรุณาชำระแพ็ก Extra 99 บาทก่อน export'
+        : detail || err?.message || 'Failed to export Extra Vault.');
     } finally {
-      setIsApplyingExtraPicks(false);
+      setIsExtraExporting(false);
     }
   };
 
@@ -494,6 +602,20 @@ const GeneratePage: React.FC = () => {
     }
   };
 
+  const finalizeFinalPackExport = async (userId: string) => {
+    const result = await finalizeCurrentStickerExport(userId);
+    setGenerationState(result.generation_state);
+    setExtraPickSlots(
+      (result.extra_vault ?? []).map((item) => ({
+        id: item.id,
+        replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
+        url: item.url,
+        createdAt: item.created_at ?? null,
+      })),
+    );
+    setSelectedExtraIds([]);
+  };
+
   const continueSaveToPhotos = async (userId: string) => {
     let stickers: Array<{ blob: Blob; fileName: string }> = [];
 
@@ -525,6 +647,7 @@ const GeneratePage: React.FC = () => {
             title: 'LINE Sticker PNG Set',
             files,
           });
+          await finalizeFinalPackExport(userId);
           return;
         }
       }
@@ -535,6 +658,7 @@ const GeneratePage: React.FC = () => {
       }
 
       await downloadStickerPngs(stickers);
+      await finalizeFinalPackExport(userId);
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         return;
@@ -546,6 +670,7 @@ const GeneratePage: React.FC = () => {
 
       if (isAndroidDevice() && stickers.length > 0 && isSharePermissionDenied) {
         await downloadStickerPngs(stickers);
+        await finalizeFinalPackExport(userId);
         return;
       }
 
@@ -565,6 +690,11 @@ const GeneratePage: React.FC = () => {
       return;
     }
 
+    if (!generationState?.final_pack_paid) {
+      await beginPayment('final_pack_199');
+      return;
+    }
+
     try {
       setIsDownloading(true);
       const { url } = await getCurrentStickersDownloadUrl(profile.userId);
@@ -573,8 +703,15 @@ const GeneratePage: React.FC = () => {
       }
 
       openDownloadUrl(url);
+      await finalizeFinalPackExport(profile.userId);
     } catch (err: any) {
-      const message = err?.response?.data?.detail || err?.message || 'Failed to download stickers.';
+      const detail = err?.response?.data?.detail;
+      if (detail?.generation_state) {
+        setGenerationState(detail.generation_state);
+      }
+      const message = detail?.error_code === 'payment_required'
+        ? 'กรุณาชำระแพ็ก 199 บาทก่อนบันทึกสติกเกอร์'
+        : detail || err?.message || 'Failed to download stickers.';
       setError(message);
     } finally {
       setIsDownloading(false);
@@ -584,6 +721,11 @@ const GeneratePage: React.FC = () => {
   const handleSaveToPhotos = async () => {
     if (!profile?.userId || !isSupportedStickerCount(stickerSlots.length)) {
       setError('Save to Photos is not ready yet. Please generate stickers first.');
+      return;
+    }
+
+    if (!generationState?.final_pack_paid) {
+      await beginPayment('final_pack_199');
       return;
     }
 
@@ -723,9 +865,26 @@ const GeneratePage: React.FC = () => {
   const unlockedCount = currentStickerCount > 0 ? currentStickerCount - lockedCount : DEFAULT_STICKER_COUNT;
   const regenerateCount = canReuseExisting ? unlockedCount : DEFAULT_STICKER_COUNT;
   const keepCount = canReuseExisting ? lockedCount : 0;
-  const canGenerate = Boolean(config.base64Image) && isOnline && (!hasGenerated || lockedCount < currentStickerCount);
+  const finalPackPaid = Boolean(generationState?.final_pack_paid);
+  const finalPackExported = Boolean(generationState?.final_pack_exported);
+  const extraPackPaid = Boolean(generationState?.extra_pack_paid);
+  const isGenerationLocked = Boolean(generationState?.is_generation_locked);
+  const attemptCount = generationState?.generation_count ?? 0;
+  const attemptLimit = generationState?.generation_limit ?? 20;
+  const remainingAttempts = generationState?.remaining_attempts ?? attemptLimit;
+  const cooldownLabel = formatCountdown(generationState?.generation_cooldown_until);
+  void clockTick;
+  const canGenerate = Boolean(config.base64Image)
+    && isOnline
+    && !isGenerationLocked
+    && !(finalPackPaid && !finalPackExported)
+    && (!hasGenerated || lockedCount < currentStickerCount);
   const generateButtonLabel = loading
     ? 'Generating...'
+    : isGenerationLocked
+      ? 'Trial Limit Reached'
+      : finalPackPaid && !finalPackExported
+        ? 'Final Pack Unlocked'
     : hasGenerated
       ? lockedCount > 0
         ? `Regenerate ${regenerateCount} Slots`
@@ -733,6 +892,8 @@ const GeneratePage: React.FC = () => {
       : 'Generate';
   const generateHelperText = loading
     ? '🔄 Generating'
+    : generationState?.warning?.message
+      ? generationState.warning.message
     : hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount
       ? 'เลือกปลดอย่างน้อย 1 รูปเพื่อเริ่มรอบถัดไป'
       : hasGenerated
@@ -785,25 +946,26 @@ const GeneratePage: React.FC = () => {
       <main id="main-content" className="mx-auto flex w-full max-w-md flex-col gap-3 px-4 pb-6 pt-3 sm:max-w-xl" aria-busy={loading}>
         <section className="flex flex-row items-center justify-between gap-3 rounded-[2.25rem] sm:rounded-[3.5rem] border border-slate-100 border-b-[6px] border-b-slate-200/50 bg-white px-5 py-5 sm:px-10 sm:py-8 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.06)]">
           <div className="flex flex-col gap-1 sm:gap-2 min-w-0">
-            <p className="text-[10px] sm:text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Your Balance</p>
-            <div className="flex items-center gap-2 sm:gap-3">
-              <div className="relative flex h-9 w-9 sm:h-12 sm:w-12 items-center justify-center shrink-0">
-                <div className="absolute inset-0 rounded-full bg-[#fbc02d] shadow-md" />
-                <div className="absolute inset-[2px] rounded-full bg-gradient-to-b from-[#ffeb3b] to-[#f9a825] shadow-[inset_0_1.5px_3px_rgba(255,255,255,0.6)]" />
-                <div className="absolute inset-[18%] rounded-full border border-[#fbc02d]/20" />
-                <span className="relative z-10 text-lg sm:text-2xl font-black text-[#9a7b0c] drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]">C</span>
-              </div>
-              <p className="text-xl sm:text-3xl font-extrabold tracking-tight text-slate-800 whitespace-nowrap">
-                {(coinBalance ?? 0).toLocaleString()} <span className="text-sm sm:text-xl font-bold text-slate-800">Coins</span>
-              </p>
-            </div>
+            <p className="text-[10px] sm:text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Trial Status</p>
+            <p className="text-xl sm:text-3xl font-extrabold tracking-tight text-slate-800 whitespace-nowrap">
+              {attemptCount}/{attemptLimit} <span className="text-sm sm:text-xl font-bold text-slate-800">attempts</span>
+            </p>
+            <p className="text-xs font-semibold text-slate-500">
+              {isGenerationLocked && cooldownLabel
+                ? `เริ่มใหม่ได้ใน ${cooldownLabel}`
+                : finalPackPaid
+                  ? 'Final pack unlocked'
+                  : `เหลือ ${remainingAttempts} ครั้งก่อนครบโควต้าทดลอง`}
+            </p>
           </div>
-          <Link
-            to="/payment"
-            className="focus-ring flex shrink-0 min-h-[3rem] sm:min-h-[4rem] items-center rounded-full bg-[#10b981] px-6 sm:px-10 py-2 text-sm sm:text-xl font-bold text-white shadow-[0_8px_20px_-4px_rgba(16,185,129,0.4)] transition-all hover:bg-[#059669] active:scale-95 whitespace-nowrap"
+          <button
+            type="button"
+            onClick={() => beginPayment('final_pack_199')}
+            disabled={isCreatingPayment === 'final_pack_199' || !isSupportedStickerCount(currentStickerCount) || finalPackPaid}
+            className="focus-ring flex shrink-0 min-h-[3rem] sm:min-h-[4rem] items-center rounded-full bg-[#10b981] px-5 sm:px-8 py-2 text-sm sm:text-lg font-bold text-white shadow-[0_8px_20px_-4px_rgba(16,185,129,0.4)] transition-all hover:bg-[#059669] active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-400 whitespace-nowrap"
           >
-            เติมเงิน
-          </Link>
+            {finalPackPaid ? 'Unlocked' : isCreatingPayment === 'final_pack_199' ? 'Opening...' : 'Save 199 THB'}
+          </button>
         </section>
         <section className="overflow-hidden rounded-[2.5rem] border border-slate-200 bg-white shadow-sm" aria-labelledby="upload-heading">
           <h2 id="upload-heading" className="sr-only">
@@ -1087,6 +1249,23 @@ const GeneratePage: React.FC = () => {
               </p>
             )}
 
+        {isGenerationLocked && !finalPackPaid ? (
+          <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status" aria-live="polite">
+            <p className="font-bold">ครบโควต้าทดลองแล้ว</p>
+            <p className="mt-1">
+              ปลดล็อกแพ็ก 199 บาทเพื่อบันทึก final 16 รูป หรือรอ {cooldownLabel ?? '24 ชม.'} เพื่อเริ่มรอบใหม่
+            </p>
+            <button
+              type="button"
+              onClick={() => beginPayment('final_pack_199')}
+              disabled={isCreatingPayment === 'final_pack_199' || !isSupportedStickerCount(currentStickerCount)}
+              className="focus-ring mt-3 min-h-11 rounded-2xl bg-amber-500 px-4 py-2 text-sm font-bold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-400"
+            >
+              {isCreatingPayment === 'final_pack_199' ? 'Opening payment...' : 'Unlock final pack - 199 THB'}
+            </button>
+          </section>
+        ) : null}
+
         {error && (
           <div className="rounded-2xl border border-red-300 bg-red-50 p-4 text-sm text-red-800" role="alert" aria-live="assertive">
             {error}
@@ -1202,7 +1381,13 @@ const GeneratePage: React.FC = () => {
                   disabled={isSharingToPhotos || !isSupportedStickerCount(currentStickerCount)}
                   className="focus-ring min-h-11 w-full rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-400"
                 >
-                  {isSharingToPhotos ? 'Preparing PNGs...' : 'Save to Photos'}
+                  {isSharingToPhotos
+                    ? 'Preparing PNGs...'
+                    : finalPackPaid
+                      ? 'Save to Photos'
+                      : isCreatingPayment === 'final_pack_199'
+                        ? 'Opening payment...'
+                        : 'Unlock & Save - 199 THB'}
                 </button>
               ) : null}
 
@@ -1216,7 +1401,13 @@ const GeneratePage: React.FC = () => {
                     : 'border-slate-300 bg-white text-slate-900 hover:border-indigo-500 hover:text-indigo-700'
                 } disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400`}
               >
-                {isDownloading ? 'Preparing ZIP...' : 'Download ZIP'}
+                {isDownloading
+                  ? 'Preparing ZIP...'
+                  : finalPackPaid
+                    ? 'Download ZIP'
+                    : isCreatingPayment === 'final_pack_199'
+                      ? 'Opening payment...'
+                      : 'Unlock ZIP - 199 THB'}
               </button>
 
               <div className="flex flex-col gap-2 border-t border-slate-100 pt-2">
@@ -1270,17 +1461,17 @@ const GeneratePage: React.FC = () => {
                 </p>
               ) : null}
             </div>
-            {extraPickSlots.length > 0 ? (
+            {finalPackExported && extraPickSlots.length > 0 ? (
               <div className="mt-6 border-t border-slate-200 pt-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h3 className="text-base font-semibold text-slate-900">Extra Picks</h3>
+                    <h3 className="text-base font-semibold text-slate-900">Extra Vault</h3>
                     <p className="text-sm text-slate-600">
-                      ตัวเลือกเพิ่มเติมจากรอบล่าสุด {extraPickSlots.length} รูป
+                      เลือกเพิ่มได้สูงสุด 16 รูป จากทั้งหมด {extraPickSlots.length} รูป
                     </p>
                   </div>
                   <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
-                    {isExtraPicksUnlocked ? 'Unlocked' : 'Locked'}
+                    {selectedExtraIds.length}/16 selected
                   </span>
                 </div>
 
@@ -1289,81 +1480,86 @@ const GeneratePage: React.FC = () => {
                     <button
                       type="button"
                       key={slot.id}
-                      onClick={() => {
-                        if (isExtraPicksUnlocked) {
-                          handleUseExtraPick(slot.index);
-                        }
-                      }}
-                      disabled={!isExtraPicksUnlocked || isApplyingExtraPicks}
+                      onClick={() => toggleExtraSelection(slot.id)}
+                      disabled={isExtraExporting || extraPackPaid}
+                      aria-pressed={selectedExtraIds.includes(slot.id)}
                       className={`relative overflow-hidden rounded-2xl border p-[3px] ${
-                        isExtraPicksUnlocked ? 'border-slate-200 hover:border-emerald-400' : 'border-slate-200'
-                      } ${!isExtraPicksUnlocked ? 'cursor-default' : ''}`}
+                        selectedExtraIds.includes(slot.id) ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200 hover:border-emerald-400'
+                      } disabled:cursor-not-allowed disabled:opacity-70`}
                     >
                       {slot.url ? (
                         <img
                           src={slot.url}
-                          alt={`Extra pick for sticker ${slot.index + 1}`}
+                          alt={`Extra sticker ${slot.replacedFromSlot != null ? slot.replacedFromSlot + 1 : ''}`}
                           className="aspect-square w-full rounded-xl bg-white object-contain"
                         />
-                      ) : slot.previewUrl ? (
-                        <div className="relative">
-                          <img
-                            src={slot.previewUrl}
-                            alt={`Locked preview for extra pick ${slot.index + 1}`}
-                            className="aspect-square w-full rounded-xl bg-slate-100 object-contain"
-                          />
-                          <div className="absolute inset-0 rounded-xl bg-gradient-to-t from-slate-950/12 via-transparent to-white/5" />
-                          <div className="pointer-events-none absolute inset-x-4 bottom-3 flex justify-center">
-                            <span className="rounded-full border border-white/35 bg-slate-950/38 px-3 py-1.5 text-xs font-semibold text-white shadow-lg backdrop-blur-sm">
-                              Preview locked
-                            </span>
-                          </div>
-                        </div>
                       ) : (
                         <div className="flex aspect-square w-full items-center justify-center rounded-xl bg-slate-100 text-center text-sm font-medium text-slate-500">
-                          Preview unavailable
+                          Extra unavailable
                         </div>
                       )}
                       <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
-                        Slot {slot.index + 1}
+                        {slot.replacedFromSlot != null ? `Slot ${slot.replacedFromSlot + 1}` : 'Extra'}
                       </span>
-                      {isExtraPicksUnlocked ? (
+                      {selectedExtraIds.includes(slot.id) ? (
                         <span className="absolute bottom-2 right-2 rounded-full bg-emerald-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
-                          Use in Final
+                          Selected
                         </span>
                       ) : null}
                     </button>
                   ))}
                 </div>
 
-                {!isExtraPicksUnlocked ? (
-                  <div className="mt-4 space-y-2">
+                <div className="mt-4 space-y-2">
+                  {!extraPackPaid ? (
                     <button
                       type="button"
-                      onClick={handleUnlockExtraPicks}
-                      disabled={isUnlockingExtraPicks || (coinBalance ?? 0) < 1}
+                      onClick={handleBuyExtraPack}
+                      disabled={selectedExtraIds.length === 0 || isCreatingPayment === 'extra_pack_99'}
                       className="focus-ring min-h-11 w-full rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-400"
                     >
-                      {isUnlockingExtraPicks ? 'Unlocking...' : 'Unlock Extra Picks (1 Coin)'}
+                      {isCreatingPayment === 'extra_pack_99' ? 'Opening payment...' : `Buy selected extras - 99 THB`}
                     </button>
-                    {(coinBalance ?? 0) < 1 ? (
-                      <p className="text-sm text-slate-600">Coins ไม่พอสำหรับปลดล็อก Extra Picks</p>
-                    ) : (
-                      <p className="text-sm text-slate-600">
-                        ปลดล็อกทั้งหมดด้วย 1 coin เพื่อดูรูปจริง แล้วเลือกเฉพาะรูปที่ต้องการสลับเข้า final 16
-                      </p>
-                    )}
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleDownloadExtraVault}
+                      disabled={isExtraExporting}
+                      className="focus-ring min-h-11 w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                    >
+                      {isExtraExporting ? 'Preparing extras...' : 'Download selected extras'}
+                    </button>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedExtraIds(extraPickSlots.slice(0, 16).map((slot) => slot.id))}
+                      disabled={extraPackPaid || extraPickSlots.length === 0}
+                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Select first 16
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedExtraIds([])}
+                      disabled={extraPackPaid || selectedExtraIds.length === 0}
+                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      onClick={refreshExtraVault}
+                      disabled={isExtraVaultLoading}
+                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-sky-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isExtraVaultLoading ? 'Refreshing...' : 'Refresh'}
+                    </button>
                   </div>
-                ) : (
-                  <div className="mt-4 space-y-2">
-                    <p className="text-sm text-slate-600">
-                      แตะรูปที่ต้องการ แล้วระบบจะสลับรูปนั้นเข้า final pack ตาม slot เดิมทันที
-                    </p>
-                    <p className="text-sm text-slate-600">
-                      เมื่อ final 16 เป็นชุดที่พอใจแล้ว กด Save to Photos ได้เลย
-                    </p>
-                  </div>
-                )}
+                  <p className="text-sm text-slate-600">
+                    Extra pack แยกจาก final 16 และจะ export เฉพาะรูปที่เลือกไว้เท่านั้น
+                  </p>
+                </div>
               </div>
             ) : null}
           </section>

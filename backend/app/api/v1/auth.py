@@ -16,7 +16,7 @@ async def sync_user(
 ):
     """
     Sync user profile from LINE.
-    Checks if a user exists. If not, initializes a new profile with free coins.
+    Checks if a user exists. If not, initializes a new pay-on-save profile.
     """
     try:
         assert_user_match(token_profile["line_id"], line_profile.line_id)
@@ -26,13 +26,7 @@ async def sync_user(
             picture_url=token_profile.get("picture_url"),
         )
         user_data = await user_service.sync_user(verified_profile)
-        
-        # Calculate if they can download (business logic: total_spent_thb >= 30)
-        can_download = user_data.get("total_spent_thb", 0.0) >= 30.0
-        
-        # Add the computed field to the response
-        user_data["can_download"] = can_download
-        
+        user_data["generation_state"] = await user_service.get_cycle_state(verified_profile.line_id)
         return user_data
     except Exception as e:
         raise HTTPException(

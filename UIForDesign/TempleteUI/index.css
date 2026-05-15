@@ -1,0 +1,86 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  
+  --color-surface: #fef7ff;
+  --color-surface-dim: #dfd7e6;
+  --color-surface-bright: #fef7ff;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f9f1ff;
+  --color-surface-container: #f3ebfa;
+  --color-surface-container-high: #ede5f4;
+  --color-surface-container-highest: #e8dfee;
+  --color-on-surface: #1d1a24;
+  --color-on-surface-variant: #4a4455;
+  --color-inverse-surface: #332f39;
+  --color-inverse-on-surface: #f6eefc;
+  --color-outline: #7b7487;
+  --color-outline-variant: #ccc3d8;
+  --color-surface-tint: #732ee4;
+  --color-primary: #630ed4;
+  --color-on-primary: #ffffff;
+  --color-primary-container: #7c3aed;
+  --color-on-primary-container: #ede0ff;
+  --color-inverse-primary: #d2bbff;
+  --color-secondary: #705d00;
+  --color-on-secondary: #ffffff;
+  --color-secondary-container: #fdd400;
+  --color-on-secondary-container: #6f5c00;
+  --color-tertiary: #7d3d00;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-container: #a15100;
+  --color-on-tertiary-container: #ffe0cd;
+  --color-error: #ba1a1a;
+  --color-on-error: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+  --color-primary-fixed: #eaddff;
+  --color-primary-fixed-dim: #d2bbff;
+  --color-on-primary-fixed: #25005a;
+  --color-on-primary-fixed-variant: #5a00c6;
+  --color-secondary-fixed: #ffe170;
+  --color-secondary-fixed-dim: #e9c400;
+  --color-on-secondary-fixed: #221b00;
+  --color-on-secondary-fixed-variant: #544600;
+  --color-tertiary-fixed: #ffdcc6;
+  --color-tertiary-fixed-dim: #ffb784;
+  --color-on-tertiary-fixed: #301400;
+  --color-on-tertiary-fixed-variant: #713700;
+  --color-background: #fef7ff;
+  --color-on-background: #1d1a24;
+  --color-surface-variant: #e8dfee;
+  --color-success-teal: #2DD4BF;
+  --color-border-light-purple: #F3E8FF;
+
+  --radius-xl: 1.5rem;
+  --radius-2xl: 2rem;
+  
+  --animate-bouncy: bouncy 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@layer utilities {
+  .bg-ai-gradient {
+    background: linear-gradient(135deg, #A855F7 0%, #7C3AED 100%);
+  }
+  
+  .text-ai-gradient {
+    background: linear-gradient(135deg, #A855F7 0%, #7C3AED 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .border-ai-gradient {
+    border: 3px solid transparent;
+    background-clip: padding-box, border-box;
+    background-origin: padding-box, border-box;
+    background-image: linear-gradient(#fff, #fff), linear-gradient(135deg, #A855F7 0%, #7C3AED 100%);
+  }
+}
+
+@keyframes bouncy {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}

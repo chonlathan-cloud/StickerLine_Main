@@ -11,7 +11,6 @@ interface AuthContextValue {
   isReady: boolean;
   isAuthenticated: boolean;
   profile: LineProfile | null;
-  coinBalance: number | null;
   error: string | null;
   login: () => void;
   logout: () => void;
@@ -23,7 +22,6 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isReady, setIsReady] = useState(false);
   const [profile, setProfile] = useState<LineProfile | null>(null);
-  const [coinBalance, setCoinBalance] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,14 +54,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (cancelled) return;
 
           try {
-            const userData = await syncUser({
+            await syncUser({
               line_id: liffProfile.userId,
               display_name: liffProfile.displayName,
               picture_url: liffProfile.pictureUrl,
             });
             if (!cancelled) {
               setProfile(liffProfile);
-              setCoinBalance(typeof userData?.coin_balance === 'number' ? userData.coin_balance : null);
               setError(null);
             }
           } catch (syncErr: any) {
@@ -105,18 +102,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     localStorage.removeItem('line_access_token');
     setProfile(null);
-    setCoinBalance(null);
   };
 
   const refreshProfile = async () => {
     if (!profile?.userId) return;
     try {
-      const userData = await syncUser({
+      await syncUser({
         line_id: profile.userId,
         display_name: profile.displayName,
         picture_url: profile.pictureUrl,
       });
-      setCoinBalance(typeof userData?.coin_balance === 'number' ? userData.coin_balance : null);
     } catch (syncErr: any) {
       setError(syncErr?.response?.data?.detail || syncErr?.message || 'Failed to refresh profile.');
     }
@@ -128,13 +123,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isReady,
       isAuthenticated,
       profile,
-      coinBalance,
       error,
       login,
       logout,
       refreshProfile,
     };
-  }, [isReady, profile, coinBalance, error]);
+  }, [isReady, profile, error]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };

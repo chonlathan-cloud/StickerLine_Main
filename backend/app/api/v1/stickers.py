@@ -7,11 +7,15 @@ from io import BytesIO
 import zipfile
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from pydantic import BaseModel
 from app.models.sticker import StickerGenerateRequest
 from app.api.deps import get_line_profile, assert_user_match
-from app.services.user_service import UserService
+from app.services.user_service import (
+    ExtraPackPaymentRequiredError,
+    FinalPackPaymentRequiredError,
+    GenerationLimitReachedError,
+    UserService,
+)
 from app.services.ai_service import AIService
 from app.services.image_service import ImageProcessor, UnsupportedStickerGridLayoutError
 from app.utils.storage import StorageClient
@@ -48,6 +52,13 @@ class UnlockExtraPicksRequest(BaseModel):
 class ApplyExtraPicksRequest(BaseModel):
     user_id: str
     selected_indices: list[int]
+
+class FinalizeExportRequest(BaseModel):
+    user_id: str
+
+class ExtraVaultExportRequest(BaseModel):
+    user_id: str
+    selected_extra_ids: list[str]
 
 def _sanitize_locked_indices(indices: list[int]) -> set[int]:
     return {idx for idx in indices if isinstance(idx, int) and idx >= 0}
@@ -99,76 +110,58 @@ def _serialize_slots(slots: list[dict], storage_client: StorageClient) -> list[d
         })
     return result_slots
 
-def _serialize_extra_picks(extra_picks: list[dict], storage_client: StorageClient, unlocked: bool) -> list[dict]:
+def _serialize_extra_vault(extra_vault: list[dict], storage_client: StorageClient, expose_urls: bool) -> list[dict]:
     serialized = []
-    for pick in sorted([p for p in extra_picks if isinstance(p, dict)], key=_extract_slot_index):
-        blob_name = pick.get("blob_name")
-        preview_blob_name = pick.get("preview_blob_name")
+    for item in extra_vault:
+        if not isinstance(item, dict):
+            continue
+        blob_name = item.get("blob_name")
+        extra_id = item.get("id")
+        if not blob_name or not extra_id:
+            continue
         serialized.append({
-            "index": _extract_slot_index(pick),
-            "url": storage_client.generate_signed_url(blob_name) if unlocked and blob_name else None,
-            "preview_url": storage_client.generate_signed_url(preview_blob_name) if preview_blob_name else None,
+            "id": extra_id,
+            "source_job_id": item.get("source_job_id"),
+            "replaced_from_slot": item.get("replaced_from_slot"),
+            "url": storage_client.generate_signed_url(blob_name) if expose_urls else None,
+            "created_at": item.get("created_at"),
         })
     return serialized
 
-def _build_extra_pick_preview(sticker_bytes: bytes, slot_index: int) -> bytes:
-    with Image.open(BytesIO(sticker_bytes)) as src:
-        base = src.convert("RGBA")
+def _payment_required_detail(product_id: str, state: dict | None = None) -> dict:
+    return {
+        "error_code": "payment_required",
+        "product_id": product_id,
+        "generation_state": state or {},
+    }
 
-    canvas = Image.new("RGBA", base.size, (246, 249, 252, 255))
+def _select_extra_vault_items(extra_vault: list[dict], selected_extra_ids: list[str]) -> list[dict]:
+    normalized_ids = []
+    seen = set()
+    for extra_id in selected_extra_ids:
+        if not isinstance(extra_id, str) or not extra_id.strip():
+            continue
+        cleaned = extra_id.strip()
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized_ids.append(cleaned)
 
-    sticker_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
-    sticker_layer.alpha_composite(base)
-    sticker_layer = sticker_layer.filter(ImageFilter.GaussianBlur(radius=4))
-    sticker_layer = ImageEnhance.Color(sticker_layer).enhance(0.7)
-    sticker_layer = ImageEnhance.Brightness(sticker_layer).enhance(0.96)
-    sticker_layer = ImageEnhance.Contrast(sticker_layer).enhance(0.96)
+    if not normalized_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least one extra sticker.")
+    if len(normalized_ids) > 16:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at most 16 extra stickers.")
 
-    canvas.alpha_composite(sticker_layer)
+    by_id = {
+        item.get("id"): item
+        for item in extra_vault
+        if isinstance(item, dict) and item.get("id") and item.get("blob_name")
+    }
+    missing = [extra_id for extra_id in normalized_ids if extra_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more extra stickers were not found.")
 
-    overlay = Image.new("RGBA", base.size, (15, 23, 42, 34))
-    canvas.alpha_composite(overlay)
-
-    draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
-    width, height = canvas.size
-
-    watermark_text = "PREVIEW"
-    step_x = max(88, width // 2)
-    step_y = max(88, height // 2)
-    for x in range(-width // 3, width + step_x, step_x):
-        for y in range(-height // 3, height + step_y, step_y):
-            draw.text(
-                (x, y),
-                watermark_text,
-                fill=(255, 255, 255, 34),
-                font=font,
-                anchor="mm",
-            )
-
-    slot_label = f"Slot {slot_index + 1}"
-    slot_bbox = draw.textbbox((0, 0), slot_label, font=font)
-    label_width = slot_bbox[2] - slot_bbox[0]
-    label_height = slot_bbox[3] - slot_bbox[1]
-    badge_padding_x = 10
-    badge_padding_y = 7
-    badge_box = (
-        12,
-        12,
-        12 + label_width + badge_padding_x * 2,
-        12 + label_height + badge_padding_y * 2,
-    )
-    draw.rounded_rectangle(badge_box, radius=18, fill=(30, 41, 59, 215))
-    draw.text(
-        (badge_box[0] + badge_padding_x, badge_box[1] + badge_padding_y - 1),
-        slot_label,
-        fill=(255, 255, 255, 235),
-        font=font,
-    )
-
-    output = BytesIO()
-    canvas.convert("RGB").save(output, format="JPEG", quality=72, optimize=True)
-    return output.getvalue()
+    return [by_id[extra_id] for extra_id in normalized_ids]
 
 async def _process_job(
     job_id: str,
@@ -352,7 +345,7 @@ async def _process_job(
                 output_blobs.append(blob_name)
 
             locked_indices = _sanitize_locked_indices(request.locked_indices)
-            existing_slots, _ = await user_service.get_current_stickers(request.user_id)
+            existing_slots, existing_job_id = await user_service.get_current_stickers(request.user_id)
             existing_map: dict[int, dict] = {}
             existing_count = 0
             for slot in existing_slots:
@@ -373,7 +366,8 @@ async def _process_job(
 
             result_slots = []
             persisted_slots = []
-            persisted_extra_picks = []
+            new_extra_vault_items = []
+            now = _utc_now()
             for index in range(sticker_count):
                 use_existing = index in locked_indices and index in existing_map
                 if use_existing:
@@ -388,29 +382,33 @@ async def _process_job(
                 else:
                     url = output_urls[index]
                     blob_name = output_blobs[index]
+                    replaced_slot = existing_map.get(index)
+                    replaced_blob = replaced_slot.get("blob_name") if replaced_slot else None
+                    if replaced_blob:
+                        new_extra_vault_items.append({
+                            "id": f"{job_id}-{index}-{uuid.uuid4().hex[:8]}",
+                            "source_job_id": replaced_slot.get("source_job_id") or existing_job_id,
+                            "replaced_by_job_id": job_id,
+                            "replaced_from_slot": index,
+                            "blob_name": replaced_blob,
+                            "created_at": now,
+                        })
 
                 locked = index in locked_indices if use_existing or locked_indices else False
                 result_slots.append({"index": index, "url": url, "locked": locked})
-                persisted_slots.append({"index": index, "blob_name": blob_name, "locked": locked})
-                if use_existing:
-                    preview_blob_name = f"users/{request.user_id}/jobs/{job_id}/extra-preview-{index}.jpg"
-                    preview_bytes = _build_extra_pick_preview(sticker_images[index], index)
-                    storage_client.upload_file(
-                        file_bytes=preview_bytes,
-                        destination_blob_name=preview_blob_name,
-                        content_type="image/jpeg",
-                    )
-                    persisted_extra_picks.append({
-                        "index": index,
-                        "blob_name": output_blobs[index],
-                        "preview_blob_name": preview_blob_name,
-                    })
+                source_job_id = existing_map[index].get("source_job_id") if use_existing and index in existing_map else job_id
+                persisted_slots.append({
+                    "index": index,
+                    "blob_name": blob_name,
+                    "locked": locked,
+                    "source_job_id": source_job_id,
+                })
 
             await user_service.set_current_generation_state(
                 request.user_id,
                 persisted_slots,
                 job_id,
-                persisted_extra_picks,
+                new_extra_vault_items,
                 False,
             )
             await _update_job(
@@ -419,17 +417,13 @@ async def _process_job(
                     "status": "completed",
                     "sticker_count": sticker_count,
                     "result_slots": persisted_slots,
-                    "extra_picks": persisted_extra_picks,
+                    "extra_vault_items": new_extra_vault_items,
+                    "extra_vault_item_count": len(new_extra_vault_items),
                 },
             )
 
     except Exception as e:
-        logger.error(f"Sticker generation failed for {request.user_id}. Rolling back coin deduction. Error: {e}")
-        try:
-            await user_service.refund_coin(request.user_id, amount=1)
-        except Exception as refund_error:
-            logger.error(f"CRITICAL: Failed to refund {request.user_id}: {refund_error}")
-
+        logger.error(f"Sticker generation failed for {request.user_id}. Error: {e}")
         await _update_job(job_id, {"status": "failed", "error": str(e)})
 
 @router.post("/generate", status_code=status.HTTP_201_CREATED)
@@ -446,20 +440,30 @@ async def generate_stickers(
     """
     user_id = request.user_id
     assert_user_match(token_profile["line_id"], user_id)
-    
-    # 1. Deduct 1 Coin from User atomically
+
     try:
-        await user_service.deduct_coin(user_id, amount=1)
+        generation_state = await user_service.prepare_generation_attempt(user_id)
+    except GenerationLimitReachedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error_code": "generation_limit_reached",
+                "product_id": "final_pack_199",
+                "generation_state": exc.state,
+            },
+        ) from exc
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         
     job_id = str(uuid.uuid4())
     job_ref = _get_jobs_collection().document(job_id)
     await job_ref.set({
         "job_id": job_id,
         "user_id": user_id,
+        "cycle_id": generation_state.get("cycle_id"),
         "status": "queued",
         "sticker_count": None,
+        "generation_state": generation_state,
         "created_at": _utc_now(),
         "updated_at": _utc_now(),
     })
@@ -478,6 +482,7 @@ async def generate_stickers(
     return {
         "job_id": job_id,
         "status": "queued",
+        "generation_state": generation_state,
     }
 
 @router.get("/current")
@@ -491,29 +496,38 @@ async def get_current_stickers(
     Return the latest sticker set for the user with fresh signed URLs.
     """
     assert_user_match(token_profile["line_id"], user_id)
+    generation_state = await user_service.get_cycle_state(user_id)
     slots, job_id = await user_service.get_current_stickers(user_id)
-    extra_picks, _, extra_picks_unlocked = await user_service.get_current_extra_picks(user_id)
+    extra_vault_state = await user_service.get_extra_vault(user_id)
+    extra_vault = extra_vault_state.get("extra_vault") or []
+    expose_extra_urls = bool(generation_state.get("final_pack_exported")) and not extra_vault_state.get("extra_vault_expired")
+    serialized_extra_vault = _serialize_extra_vault(extra_vault, storage_client, expose_extra_urls)
     if not slots:
         return {
             "status": "empty",
             "job_id": job_id,
             "sticker_count": 0,
             "result_slots": [],
-            "extra_pick_count": 0,
-            "extra_picks_unlocked": extra_picks_unlocked,
+            "generation_state": generation_state,
+            "extra_vault_count": len(serialized_extra_vault),
+            "extra_vault": serialized_extra_vault,
+            "extra_pick_count": len(serialized_extra_vault),
+            "extra_picks_unlocked": expose_extra_urls,
             "extra_picks": [],
         }
 
     result_slots = _serialize_slots(slots, storage_client)
-    serialized_extra_picks = _serialize_extra_picks(extra_picks, storage_client, extra_picks_unlocked)
     return {
         "status": "ok",
         "job_id": job_id,
         "sticker_count": len(result_slots),
         "result_slots": result_slots,
-        "extra_pick_count": len(serialized_extra_picks),
-        "extra_picks_unlocked": extra_picks_unlocked,
-        "extra_picks": serialized_extra_picks,
+        "generation_state": generation_state,
+        "extra_vault_count": len(serialized_extra_vault),
+        "extra_vault": serialized_extra_vault,
+        "extra_pick_count": len(serialized_extra_vault),
+        "extra_picks_unlocked": expose_extra_urls,
+        "extra_picks": serialized_extra_vault,
     }
 
 @router.post("/current/extra-picks/unlock", status_code=status.HTTP_200_OK)
@@ -524,23 +538,10 @@ async def unlock_current_extra_picks(
     token_profile: dict = Depends(get_line_profile),
 ):
     assert_user_match(token_profile["line_id"], request.user_id)
-    try:
-        new_balance = await user_service.unlock_current_extra_picks(request.user_id, amount=1)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    slots, job_id = await user_service.get_current_stickers(request.user_id)
-    extra_picks, _, extra_picks_unlocked = await user_service.get_current_extra_picks(request.user_id)
-    return {
-        "status": "ok",
-        "job_id": job_id,
-        "coin_balance": new_balance,
-        "sticker_count": len(slots),
-        "result_slots": _serialize_slots(slots, storage_client),
-        "extra_pick_count": len(extra_picks),
-        "extra_picks_unlocked": extra_picks_unlocked,
-        "extra_picks": _serialize_extra_picks(extra_picks, storage_client, extra_picks_unlocked),
-    }
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Extra Picks unlock was removed. Use Extra Vault after final pack export.",
+    )
 
 @router.post("/current/extra-picks/apply", status_code=status.HTTP_200_OK)
 async def apply_current_extra_picks(
@@ -550,26 +551,10 @@ async def apply_current_extra_picks(
     token_profile: dict = Depends(get_line_profile),
 ):
     assert_user_match(token_profile["line_id"], request.user_id)
-    if not request.selected_indices:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least one extra pick.")
-
-    try:
-        updated = await user_service.apply_current_extra_picks(request.user_id, request.selected_indices)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    slots = updated.get("current_stickers") or []
-    extra_picks = updated.get("current_extra_picks") or []
-    extra_picks_unlocked = bool(updated.get("current_extra_picks_unlocked", False))
-    return {
-        "status": "ok",
-        "job_id": updated.get("current_stickers_job_id"),
-        "sticker_count": len(slots),
-        "result_slots": _serialize_slots(slots, storage_client),
-        "extra_pick_count": len(extra_picks),
-        "extra_picks_unlocked": extra_picks_unlocked,
-        "extra_picks": _serialize_extra_picks(extra_picks, storage_client, extra_picks_unlocked),
-    }
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Extra Picks swapping was removed. Extra Vault is exported separately after final pack save.",
+    )
 
 @router.post("/reset", status_code=status.HTTP_200_OK)
 async def reset_current_stickers(
@@ -595,6 +580,14 @@ async def download_current_sticker_zip(
     Download the latest merged sticker set for a user as a ZIP file.
     """
     assert_user_match(token_profile["line_id"], user_id)
+    try:
+        await user_service.require_final_pack_paid(user_id)
+    except FinalPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("final_pack_199", exc.state),
+        ) from exc
+
     slots, _ = await user_service.get_current_stickers(user_id)
     if not slots:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No stickers found for this user.")
@@ -634,6 +627,14 @@ async def get_current_sticker_download_url(
     Generate a ZIP in GCS and return a signed URL for direct download (mobile-friendly).
     """
     assert_user_match(token_profile["line_id"], user_id)
+    try:
+        await user_service.require_final_pack_paid(user_id)
+    except FinalPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("final_pack_199", exc.state),
+        ) from exc
+
     slots, _ = await user_service.get_current_stickers(user_id)
     if not slots:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No stickers found for this user.")
@@ -683,6 +684,14 @@ async def get_current_sticker_share_file(
     Stream a single sticker PNG from the current set for mobile share flows.
     """
     assert_user_match(token_profile["line_id"], user_id)
+    try:
+        await user_service.require_final_pack_paid(user_id)
+    except FinalPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("final_pack_199", exc.state),
+        ) from exc
+
     slots, _ = await user_service.get_current_stickers(user_id)
     if not slots:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No stickers found for this user.")
@@ -718,6 +727,109 @@ async def get_current_sticker_share_file(
         "Cache-Control": "no-store",
     }
     return StreamingResponse(BytesIO(sticker_bytes), media_type="image/png", headers=headers)
+
+@router.post("/current/finalize-export", status_code=status.HTTP_200_OK)
+async def finalize_current_final_pack_export(
+    request: FinalizeExportRequest,
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    """
+    Mark final pack export as completed after the frontend download/share flow finishes.
+    This unlocks the Extra Vault upsell window for 24 hours.
+    """
+    assert_user_match(token_profile["line_id"], request.user_id)
+    try:
+        result = await user_service.mark_final_pack_exported(request.user_id)
+    except FinalPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("final_pack_199", exc.state),
+        ) from exc
+
+    extra_vault = result.get("extra_vault") or []
+    return {
+        "status": "ok",
+        "generation_state": result["generation_state"],
+        "extra_vault_count": len(extra_vault),
+        "extra_vault": _serialize_extra_vault(extra_vault, storage_client, expose_urls=True),
+    }
+
+@router.get("/current/extra-vault")
+async def get_current_extra_vault(
+    user_id: str = Query(..., min_length=3),
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    assert_user_match(token_profile["line_id"], user_id)
+    result = await user_service.get_extra_vault(user_id)
+    state = result["generation_state"]
+    extra_vault = result.get("extra_vault") or []
+    expose_urls = bool(state.get("final_pack_exported")) and not result.get("extra_vault_expired")
+    return {
+        "status": "ok",
+        "generation_state": state,
+        "extra_vault_expired": bool(result.get("extra_vault_expired")),
+        "extra_vault_count": len(extra_vault),
+        "extra_vault": _serialize_extra_vault(extra_vault, storage_client, expose_urls=expose_urls),
+    }
+
+@router.post("/current/extra-vault/download-url", status_code=status.HTTP_200_OK)
+async def get_current_extra_vault_download_url(
+    request: ExtraVaultExportRequest,
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    assert_user_match(token_profile["line_id"], request.user_id)
+    try:
+        vault_state = await user_service.require_extra_pack_paid(request.user_id)
+    except ExtraPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("extra_pack_99", exc.state),
+        ) from exc
+
+    state = vault_state["generation_state"]
+    paid_selected_ids = state.get("extra_pack_selected_ids") or []
+    selected_ids = paid_selected_ids or request.selected_extra_ids
+    selected_items = _select_extra_vault_items(vault_state.get("extra_vault") or [], selected_ids)
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for position, item in enumerate(selected_items, start=1):
+            blob_name = item.get("blob_name")
+            if not blob_name:
+                continue
+            replaced_slot = item.get("replaced_from_slot")
+            filename = f"extra-{position:02d}"
+            if isinstance(replaced_slot, int):
+                filename = f"{filename}-slot-{replaced_slot + 1:02d}"
+            blob = storage_client.bucket.blob(blob_name)
+            archive.writestr(f"{filename}.png", blob.download_as_bytes())
+
+    buffer.seek(0)
+    display_name = await user_service.get_display_name(request.user_id) or request.user_id
+    filename = f"extra_stickers_{_sanitize_filename(display_name)}.zip"
+    blob_name = f"users/{request.user_id}/downloads/{uuid.uuid4()}-extras.zip"
+
+    url = storage_client.upload_file(
+        file_bytes=buffer.getvalue(),
+        destination_blob_name=blob_name,
+        content_type="application/zip",
+        response_disposition=f"attachment; filename={filename}",
+        response_type="application/zip",
+    )
+    generation_state = await user_service.mark_extra_pack_exported(request.user_id)
+
+    return {
+        "status": "ok",
+        "url": url,
+        "selected_extra_ids": [item["id"] for item in selected_items],
+        "generation_state": generation_state,
+    }
 
 @router.get("/{job_id}")
 async def get_job_status(
@@ -756,18 +868,29 @@ async def get_job_status(
             "job_id": job_id,
             "sticker_count": len(result_slots),
             "result_slots": result_slots,
+            "generation_state": data.get("generation_state"),
+            "extra_vault_item_count": int(data.get("extra_vault_item_count") or 0),
         }
         if data.get("grid_blob"):
             response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
         return response
 
     if status_value == "failed":
-        response = {"status": "failed", "job_id": job_id, "error": data.get("error", "Unknown error")}
+        response = {
+            "status": "failed",
+            "job_id": job_id,
+            "error": data.get("error", "Unknown error"),
+            "generation_state": data.get("generation_state"),
+        }
         if data.get("grid_blob"):
             response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
         return response
 
-    response = {"status": status_value or "queued", "job_id": job_id}
+    response = {
+        "status": status_value or "queued",
+        "job_id": job_id,
+        "generation_state": data.get("generation_state"),
+    }
     if data.get("grid_blob"):
         response["grid_url"] = storage_client.generate_signed_url(data["grid_blob"])
     return response
@@ -776,6 +899,7 @@ async def get_job_status(
 async def download_sticker_zip(
     job_id: str,
     user_id: str = Query(..., min_length=3),
+    user_service: UserService = Depends(get_user_service),
     storage_client: StorageClient = Depends(get_storage_client),
     token_profile: dict = Depends(get_line_profile),
 ):
@@ -783,6 +907,14 @@ async def download_sticker_zip(
     Download all generated stickers for a job as a ZIP file.
     """
     assert_user_match(token_profile["line_id"], user_id)
+    try:
+        await user_service.require_final_pack_paid(user_id)
+    except FinalPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("final_pack_199", exc.state),
+        ) from exc
+
     prefix = f"users/{user_id}/jobs/{job_id}/"
     blobs = storage_client.list_blobs(prefix=prefix)
     if not blobs:

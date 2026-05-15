@@ -11,6 +11,7 @@ import httpx
 from google.cloud import firestore
 
 from app.core.config import settings
+from app.services.user_service import EXTRA_PACK_PRODUCT_ID, FINAL_PACK_PRODUCT_ID
 from app.utils.firestore import get_db
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,17 @@ class PaymentService:
     def __init__(self):
         self.db = get_db()
         self.beam_api_url = f"{settings.BEAM_BASE_URL.rstrip('/')}/api/v1/payment-links"
-        self.packages = {
-            "pkg_70": {"amount_satang": 7000, "coins": 7, "title": "Starter Pack"},
-            "pkg_100": {"amount_satang": 10000, "coins": 12, "title": "Best Value Pack"},
+        self.products = {
+            FINAL_PACK_PRODUCT_ID: {
+                "amount_satang": 19900,
+                "title": "Final Sticker Pack",
+                "description": "Save final 16 stickers",
+            },
+            EXTRA_PACK_PRODUCT_ID: {
+                "amount_satang": 9900,
+                "title": "Extra Sticker Pack",
+                "description": "Save up to 16 selected extra stickers",
+            },
         }
 
     def _ensure_beam_configured(self) -> None:
@@ -89,38 +98,83 @@ class PaymentService:
             return "failed"
         return "pending"
 
-    def _get_package(self, package_id: str) -> dict[str, Any]:
-        package = self.packages.get(package_id)
-        if not package:
-            raise ValueError("Invalid package_id. Allowed: pkg_70, pkg_100")
-        return package
+    def _get_product(self, product_id: str) -> dict[str, Any]:
+        product = self.products.get(product_id)
+        if not product:
+            allowed = ", ".join(sorted(self.products))
+            raise ValueError(f"Invalid product_id. Allowed: {allowed}")
+        return product
 
     def _extract_payment_link_id(self, payload: dict[str, Any]) -> str | None:
         return payload.get("paymentLinkId") or payload.get("id") or payload.get("sourceId")
 
-    async def create_payment_link(self, user_id: str, package_id: str) -> dict[str, Any]:
+    async def create_payment_link(
+        self,
+        user_id: str,
+        product_id: str,
+        cycle_id: str | None = None,
+        selected_extra_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         self._ensure_beam_configured()
-        package = self._get_package(package_id)
-        reference_id = f"{user_id}:{package_id}:{uuid4().hex[:12]}"
+        product = self._get_product(product_id)
+        user_ref = self.db.collection("users").document(user_id)
+        user_snapshot = await user_ref.get()
+        if not user_snapshot.exists:
+            raise ValueError(f"User {user_id} not found")
+
+        user_data = user_snapshot.to_dict() or {}
+        resolved_cycle_id = cycle_id or user_data.get("current_cycle_id")
+        if not resolved_cycle_id:
+            raise ValueError("User does not have an active sticker cycle.")
+        selected_extra_ids = selected_extra_ids or []
+        now_utc = datetime.now(timezone.utc)
+        if product_id == FINAL_PACK_PRODUCT_ID:
+            if user_data.get("final_pack_paid_at"):
+                raise ValueError("Final pack is already paid.")
+            cooldown_until = user_data.get("generation_cooldown_until")
+            if user_data.get("generation_locked_at") and cooldown_until and cooldown_until <= now_utc:
+                raise ValueError("This sticker cycle has expired. Start a new cycle.")
+            if not (user_data.get("current_stickers") or []):
+                raise ValueError("No final stickers are ready to save.")
+        if product_id == EXTRA_PACK_PRODUCT_ID:
+            if user_data.get("extra_pack_paid_at"):
+                raise ValueError("Extra pack is already paid.")
+            if not user_data.get("final_pack_exported_at"):
+                raise ValueError("Final pack must be saved before buying extras.")
+            expires_at = user_data.get("extra_vault_expires_at")
+            if expires_at and expires_at <= now_utc:
+                raise ValueError("Extra Vault has expired.")
+            extra_vault = [item for item in (user_data.get("extra_vault") or []) if isinstance(item, dict)]
+            if not extra_vault:
+                raise ValueError("No extra stickers are available.")
+            if len(selected_extra_ids) > 16:
+                raise ValueError("Select at most 16 extra stickers.")
+            available_ids = {item.get("id") for item in extra_vault}
+            if not selected_extra_ids:
+                raise ValueError("Select at least one extra sticker.")
+            if any(extra_id not in available_ids for extra_id in selected_extra_ids):
+                raise ValueError("One or more selected extra stickers are unavailable.")
+
+        reference_id = f"{user_id}:{product_id}:{resolved_cycle_id}:{uuid4().hex[:12]}"
         redirect_url = self._build_redirect_url()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.PAYMENT_LINK_EXPIRY_MINUTES)
+        expires_at = now_utc + timedelta(minutes=settings.PAYMENT_LINK_EXPIRY_MINUTES)
 
         payload = {
             "collectDeliveryAddress": False,
             "linkSettings": self._build_link_settings(),
             "order": {
                 "currency": settings.PAYMENT_CURRENCY,
-                "description": f"{package['title']} ({package['coins']} coins)",
+                "description": product["description"],
                 "internalNote": user_id,
-                "netAmount": package["amount_satang"],
+                "netAmount": product["amount_satang"],
                 "orderItems": [
                     {
-                        "description": f"Top up {package['coins']} coins",
-                        "itemName": package["title"],
-                        "price": package["amount_satang"],
-                        "productId": package_id,
+                        "description": product["description"],
+                        "itemName": product["title"],
+                        "price": product["amount_satang"],
+                        "productId": product_id,
                         "quantity": 1,
-                        "sku": package_id,
+                        "sku": product_id,
                     }
                 ],
                 "referenceId": reference_id,
@@ -150,22 +204,22 @@ class PaymentService:
             logger.error("Beam response missing payment link id or url: %s", data)
             raise ValueError("Invalid Beam response")
 
-        now_utc = datetime.now(timezone.utc)
         payment_ref = self.db.collection("payments").document(payment_link_id)
         await payment_ref.set(
             {
                 "payment_link_id": payment_link_id,
                 "provider": "beam",
                 "user_id": user_id,
-                "package_id": package_id,
+                "cycle_id": resolved_cycle_id,
+                "product_id": product_id,
                 "reference_id": reference_id,
-                "amount_satang": package["amount_satang"],
-                "thb_amount": package["amount_satang"] / 100.0,
-                "coins": package["coins"],
+                "amount_satang": product["amount_satang"],
+                "thb_amount": product["amount_satang"] / 100.0,
                 "status": self._normalize_status(provider_status),
                 "provider_status": provider_status,
                 "checkout_url": checkout_url,
                 "redirect_url": redirect_url,
+                "selected_extra_ids": selected_extra_ids,
                 "expires_at": data.get("expiresAt") or expires_at.isoformat(),
                 "created_at": now_utc,
                 "updated_at": now_utc,
@@ -176,9 +230,11 @@ class PaymentService:
             "payment_link_id": payment_link_id,
             "status": self._normalize_status(provider_status),
             "provider_status": provider_status,
-            "amount_satang": package["amount_satang"],
-            "coins": package["coins"],
+            "product_id": product_id,
+            "cycle_id": resolved_cycle_id,
+            "amount_satang": product["amount_satang"],
             "checkout_url": checkout_url,
+            "selected_extra_ids": selected_extra_ids,
             "expires_at": data.get("expiresAt") or expires_at.isoformat(),
         }
 
@@ -220,9 +276,11 @@ class PaymentService:
             "user_id": data.get("user_id"),
             "status": data.get("status", "pending"),
             "provider_status": data.get("provider_status", "ACTIVE"),
-            "coins": data.get("coins", 0),
+            "product_id": data.get("product_id"),
+            "cycle_id": data.get("cycle_id"),
             "amount_satang": data.get("amount_satang", 0),
             "checkout_url": data.get("checkout_url"),
+            "selected_extra_ids": data.get("selected_extra_ids") or [],
             "expires_at": data.get("expires_at"),
         }
 
@@ -305,7 +363,7 @@ class PaymentService:
     ) -> None:
         transaction = self.db.transaction()
         payment_ref = self.db.collection("payments").document(payment_link_id)
-        txn_ref = self.db.collection("transactions").document(f"topup_{payment_link_id}")
+        purchase_ref = self.db.collection("purchases").document(f"purchase_{payment_link_id}")
 
         @firestore.async_transactional
         async def atomic_apply(transaction_obj):
@@ -332,30 +390,50 @@ class PaymentService:
             if not user_snapshot.exists:
                 raise ValueError(f"User {user_id} not found")
 
-            coins = int(payment_data.get("coins", 0))
+            product_id = payment_data.get("product_id")
+            if product_id not in {FINAL_PACK_PRODUCT_ID, EXTRA_PACK_PRODUCT_ID}:
+                raise ValueError(f"Unsupported product_id: {product_id}")
+
             thb_amount = float(payment_data.get("thb_amount") or (received_amount / 100.0))
             user_data = user_snapshot.to_dict() or {}
             now_utc = datetime.now(timezone.utc)
+            selected_extra_ids = payment_data.get("selected_extra_ids") or []
+            cycle_id = payment_data.get("cycle_id") or user_data.get("current_cycle_id")
+
+            user_update = {
+                "total_spent_thb": float(user_data.get("total_spent_thb", 0.0)) + thb_amount,
+                "updated_at": now_utc,
+            }
+            if product_id == FINAL_PACK_PRODUCT_ID:
+                user_update.update({
+                    "final_pack_paid_at": now_utc,
+                    "final_pack_payment_link_id": payment_link_id,
+                })
+            elif product_id == EXTRA_PACK_PRODUCT_ID:
+                user_update.update({
+                    "extra_pack_paid_at": now_utc,
+                    "extra_pack_payment_link_id": payment_link_id,
+                    "extra_pack_selected_ids": selected_extra_ids,
+                })
 
             transaction_obj.update(
                 user_ref,
-                {
-                    "coin_balance": int(user_data.get("coin_balance", 0)) + coins,
-                    "total_spent_thb": float(user_data.get("total_spent_thb", 0.0)) + thb_amount,
-                    "updated_at": now_utc,
-                },
+                user_update,
             )
             transaction_obj.set(
-                txn_ref,
+                purchase_ref,
                 {
-                    "txn_id": txn_ref.id,
+                    "purchase_id": purchase_ref.id,
                     "user_id": user_id,
-                    "type": "topup",
-                    "amount": coins,
-                    "reference_id": payment_link_id,
+                    "cycle_id": cycle_id,
+                    "product_id": product_id,
+                    "amount_satang": received_amount,
                     "provider": "beam",
+                    "payment_link_id": payment_link_id,
                     "source": source,
-                    "timestamp": now_utc,
+                    "selected_extra_ids": selected_extra_ids,
+                    "purchased_at": now_utc,
+                    "exported_at": None,
                 },
             )
             transaction_obj.set(

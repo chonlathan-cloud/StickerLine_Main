@@ -23,8 +23,77 @@ API.interceptors.request.use((config) => {
   return config;
 });
 
+export type PaymentProductId = 'final_pack_199' | 'extra_pack_99';
+export type GenerationWarning = {
+  level: 'gentle' | 'strong' | 'limit_reached';
+  message: string;
+  remaining: number;
+};
+export type GenerationState = {
+  cycle_id?: string | null;
+  generation_count: number;
+  generation_limit: number;
+  remaining_attempts: number;
+  is_generation_locked: boolean;
+  generation_locked_at?: string | null;
+  generation_cooldown_until?: string | null;
+  final_pack_paid: boolean;
+  final_pack_exported: boolean;
+  extra_pack_paid: boolean;
+  extra_pack_exported: boolean;
+  extra_pack_selected_ids?: string[];
+  extra_vault_expires_at?: string | null;
+  warning?: GenerationWarning | null;
+};
 export type StickerSlotResponse = { index: number; url: string; locked: boolean };
 export type ExtraPickResponse = { index: number; url: string | null; preview_url?: string | null };
+export type ExtraVaultItemResponse = {
+  id: string;
+  source_job_id?: string | null;
+  replaced_from_slot?: number | null;
+  url: string | null;
+  created_at?: string | null;
+};
+
+export const PENDING_PAYMENT_ID_KEY = 'beam_pending_payment_link_id';
+export const PENDING_CHECKOUT_URL_KEY = 'beam_pending_checkout_url';
+export const PENDING_PRODUCT_ID_KEY = 'beam_pending_product_id';
+export const PENDING_EXPIRES_AT_KEY = 'beam_pending_expires_at';
+export const PENDING_SELECTED_EXTRA_IDS_KEY = 'beam_pending_selected_extra_ids';
+
+export const persistPendingPayment = (
+  paymentLinkId: string,
+  checkoutUrl: string,
+  productId: PaymentProductId,
+  expiresAt?: string | null,
+  selectedExtraIds: string[] = [],
+) => {
+  try {
+    localStorage.setItem(PENDING_PAYMENT_ID_KEY, paymentLinkId);
+    localStorage.setItem(PENDING_CHECKOUT_URL_KEY, checkoutUrl);
+    localStorage.setItem(PENDING_PRODUCT_ID_KEY, productId);
+    localStorage.setItem(PENDING_SELECTED_EXTRA_IDS_KEY, JSON.stringify(selectedExtraIds));
+    if (expiresAt) {
+      localStorage.setItem(PENDING_EXPIRES_AT_KEY, expiresAt);
+    } else {
+      localStorage.removeItem(PENDING_EXPIRES_AT_KEY);
+    }
+  } catch {
+    // ignore browser storage failures
+  }
+};
+
+export const clearPendingPayment = () => {
+  try {
+    localStorage.removeItem(PENDING_PAYMENT_ID_KEY);
+    localStorage.removeItem(PENDING_CHECKOUT_URL_KEY);
+    localStorage.removeItem(PENDING_PRODUCT_ID_KEY);
+    localStorage.removeItem(PENDING_EXPIRES_AT_KEY);
+    localStorage.removeItem(PENDING_SELECTED_EXTRA_IDS_KEY);
+  } catch {
+    // ignore browser storage failures
+  }
+};
 
 //const API = axios.create({
 //  baseURL: (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080',
@@ -54,6 +123,7 @@ export async function startGeneration(
     sticker_count?: number;
     result_urls?: string[];
     result_slots?: Array<{ index: number; url: string; locked: boolean }>;
+    generation_state?: GenerationState;
   }>(
     '/api/v1/jobs/generate',
     { user_id: userId, image_uri: gcsUri, style, prompt, locked_indices: lockedIndices },
@@ -68,6 +138,8 @@ export async function checkJobStatus(jobId: string) {
     job_id?: string;
     sticker_count?: number;
     result_slots?: Array<{ index: number; url: string; locked: boolean }>;
+    generation_state?: GenerationState;
+    extra_vault_item_count?: number;
     error?: string;
   }>(
     `/api/v1/jobs/${jobId}`,
@@ -85,18 +157,29 @@ export async function syncUser(lineProfile: {
   return data;
 }
 
-export async function createPayment(userId: string, packageId: string) {
+export async function createPayment(
+  userId: string,
+  productId: PaymentProductId,
+  options: {
+    cycleId?: string | null;
+    selectedExtraIds?: string[];
+  } = {},
+) {
   const { data } = await API.post<{
     payment_link_id: string;
     status: string;
     provider_status: string;
+    product_id: PaymentProductId;
+    cycle_id?: string | null;
     amount_satang: number;
-    coins: number;
     checkout_url: string;
+    selected_extra_ids?: string[];
     expires_at?: string | null;
   }>('/api/v1/payments/create', {
     user_id: userId,
-    package_id: packageId,
+    product_id: productId,
+    cycle_id: options.cycleId,
+    selected_extra_ids: options.selectedExtraIds,
   });
   return data;
 }
@@ -106,9 +189,11 @@ export async function getPaymentStatus(chargeId: string) {
     payment_link_id: string;
     status: string;
     provider_status: string;
-    coins: number;
+    product_id?: PaymentProductId | null;
+    cycle_id?: string | null;
     amount_satang: number;
     checkout_url?: string | null;
+    selected_extra_ids?: string[];
     expires_at?: string | null;
   }>(`/api/v1/payments/status?payment_link_id=${encodeURIComponent(chargeId)}`);
   return data;
@@ -120,38 +205,46 @@ export async function getCurrentStickers(userId: string) {
     job_id?: string | null;
     sticker_count?: number;
     result_slots?: StickerSlotResponse[];
+    generation_state?: GenerationState;
+    extra_vault_count?: number;
+    extra_vault?: ExtraVaultItemResponse[];
     extra_pick_count?: number;
     extra_picks_unlocked?: boolean;
     extra_picks?: ExtraPickResponse[];
   }>(`/api/v1/jobs/current?user_id=${encodeURIComponent(userId)}`);
   return data;
 }
-export async function unlockCurrentExtraPicks(userId: string) {
+
+export async function finalizeCurrentStickerExport(userId: string) {
   const { data } = await API.post<{
     status: string;
-    job_id?: string | null;
-    coin_balance?: number;
-    sticker_count?: number;
-    result_slots?: StickerSlotResponse[];
-    extra_pick_count?: number;
-    extra_picks_unlocked?: boolean;
-    extra_picks?: ExtraPickResponse[];
-  }>('/api/v1/jobs/current/extra-picks/unlock', { user_id: userId });
+    generation_state: GenerationState;
+    extra_vault_count: number;
+    extra_vault: ExtraVaultItemResponse[];
+  }>('/api/v1/jobs/current/finalize-export', { user_id: userId });
   return data;
 }
 
-export async function applyCurrentExtraPicks(userId: string, selectedIndices: number[]) {
+export async function getCurrentExtraVault(userId: string) {
+  const { data } = await API.get<{
+    status: string;
+    generation_state: GenerationState;
+    extra_vault_expired: boolean;
+    extra_vault_count: number;
+    extra_vault: ExtraVaultItemResponse[];
+  }>(`/api/v1/jobs/current/extra-vault?user_id=${encodeURIComponent(userId)}`);
+  return data;
+}
+
+export async function getExtraVaultDownloadUrl(userId: string, selectedExtraIds: string[]) {
   const { data } = await API.post<{
     status: string;
-    job_id?: string | null;
-    sticker_count?: number;
-    result_slots?: StickerSlotResponse[];
-    extra_pick_count?: number;
-    extra_picks_unlocked?: boolean;
-    extra_picks?: ExtraPickResponse[];
-  }>('/api/v1/jobs/current/extra-picks/apply', {
+    url: string;
+    selected_extra_ids: string[];
+    generation_state: GenerationState;
+  }>('/api/v1/jobs/current/extra-vault/download-url', {
     user_id: userId,
-    selected_indices: selectedIndices,
+    selected_extra_ids: selectedExtraIds,
   });
   return data;
 }

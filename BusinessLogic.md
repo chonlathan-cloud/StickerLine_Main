@@ -1,95 +1,227 @@
 # Business Logic
 
----
+This document is the source of truth for the updated pay-on-save model. The previous coin economy is removed from user-facing UI and business logic.
 
-### 1. Core Business Logic & Rules (สรุปตรรกะทางธุรกิจ)
+## 1. Core Rules
 
-จากการวิเคราะห์ ข้อมูล Business Logic ที่สำคัญที่สุดแบ่งออกเป็น 4 ส่วนหลัก ดังนี้ครับ:
+### A. User Identity
 
-**A. User Identity & Onboarding (การยืนยันตัวตน)**
+- `line_id` is the primary user identifier.
+- Sensitive actions must be checked by the backend using the LIFF access token or a trusted session.
+- The frontend must not be trusted for generation counts, payment entitlement, export access, or cooldown status.
 
-- **Single Source of Truth:** ใช้ `line_id` เป็น Primary Key เพียงอย่างเดียว
-- **Free Trial Rule:** ผู้ใช้ใหม่ (New User) จะได้รับ 2 Coins ฟรี **ครั้งเดียวเท่านั้น** ตรวจสอบผ่าน Flag `is_free_trial_used`.
-- **Session Security:** การกระทำ Sensitive (Generate, Download) ต้องตรวจสอบผ่าน Backend โดยใช้ LIFF Access Token หรือ Session ID เสมอ ห้ามเชื่อ Client-side.
+### B. No Coin Economy
 
-**B. Token Economy (ระบบเงินตรา)**
+- Users do not receive free coins.
+- Users do not buy coin packages.
+- Generating and regenerating do not deduct coins.
+- Any existing `coin_balance` field is legacy data only and must not drive new UI or access control.
 
-- **Exchange Rate:** Base rate คือ 10 THB = 1 Coin (มีโปรโมชั่นตามแพ็กเกจ เช่น 100 บาท ได้ 12 Coins).
-- **Cost of Goods:** การสร้างสติกเกอร์ 1 ครั้ง (1 Request) = หัก 1 Coin.
-- **Deduction Logic:** ต้องทำแบบ **Atomic Transaction** (หักเงินสำเร็จก่อน จึงเริ่มสั่งงาน AI) เพื่อป้องกัน Race Condition.
+### C. Trial Generation Counter
 
-**C. Generation Workflow (ขั้นตอนการสร้างงาน)**
+- Each cycle allows 20 total generation attempts.
+- A generation attempt means any successful tap on `Generate` or `Regenerate`.
+- `Generate` and `Regenerate` are counted together.
+- Attempts 1-14 do not show a limit warning.
+- Attempts 15-19 show a warning.
+- Attempt 20 immediately blocks further generation and routes the user toward the 199 THB final pack.
+- The generation counter must be updated atomically on the backend.
 
-- **Input:** รูปถ่ายของผู้ใช้ (User Photo) + Master Prompt (Backend Managed).
-- **AI Output Standard:**
-    - Model: Vertex AI (Gemini 1.5 Flash).
-    - Format: 4x4 Grid (รวม 16 ท่าทางใน 1 รูป).
-    - Requirement: พื้นหลังสีเขียว (#00FF00) เพื่อให้ง่ายต่อการ Die-cut.
-- **Post-Processing:** ระบบ Backend ต้องทำ Background Removal (ลบสีเขียว) และ Add White Stroke (ขอบขาว) ให้อัตโนมัติ.
-- **Data Retention:** รูปภาพผลลัพธ์เก็บใน GCS และมี Lifecycle ลบอัตโนมัติใน 24 ชม. (เพื่อลดต้นทุน Storage).
+Approved Thai warning copy:
 
-**D. Access Control (เงื่อนไขการดาวน์โหลด)**
+| Attempt range | Copy |
+| --- | --- |
+| 15-17 | `ใกล้ครบโควต้าทดลองแล้ว เหลืออีก {remaining} ครั้งก่อนต้องปลดล็อกเพื่อบันทึกรูป` |
+| 18-19 | `เหลืออีก {remaining} ครั้งเท่านั้น บันทึกชุดนี้ได้ด้วยแพ็ก 199 บาท` |
+| 20 | `ครบโควต้าทดลองแล้ว ปลดล็อก 199 บาทเพื่อบันทึกสติกเกอร์ชุดนี้` |
 
-- **The "30 Baht" Gate:** การดาวน์โหลดไฟล์ความละเอียดสูง (Final Product) ไม่ได้ขึ้นอยู่กับจำนวน Coin ที่เหลือ แต่ขึ้นอยู่กับ `total_spent_thb` >= 30.
-    - *นัยยะสำคัญ:* ผู้ใช้สายฟรี (Free Tier) จะ Generate เล่นได้ แต่จะเอารูปไปใช้จริงไม่ได้จนกว่าจะจ่ายเงิน (Pay-to-Unlock).
+### D. 24-Hour Cooldown
 
----
+- When attempt 20 is used, set `generation_locked_at` to the current backend time.
+- Set `generation_cooldown_until = generation_locked_at + 24 hours`.
+- If the user does not buy the final pack, the app shows a countdown until `generation_cooldown_until`.
+- During countdown, the primary call to action is still the 199 THB final pack payment.
+- If the user pays during cooldown, they can save the final pack.
+- If cooldown ends without payment, reset the full cycle:
+  - generation counter
+  - current final stickers
+  - Extra Vault
+  - cycle payment state
+  - lock and cooldown fields
 
-### 2. Key Actors & Main Actions
+### E. Final Pack Payment
 
-| Actor (ผู้เกี่ยวข้อง) | Role Description | Main Actions (กิจกรรมหลัก) |
+- Saving the final stickers always requires payment.
+- This applies even if the user has not reached the 20-attempt limit.
+- Product ID: `final_pack_199`
+- Price: 199 THB
+- Provider: Beam
+- Payment success grants export entitlement for the current final 16 stickers in the current cycle.
+- Payment success does not reset the cycle by itself.
+- The cycle should be finalized only after the save/export flow completes and the user reaches the success summary screen.
+
+### F. Save Success Definition
+
+- Browser and LIFF environments cannot guarantee that files are physically stored in the user's Photos app.
+- Treat save as successful when the backend/frontend download or share flow has completed and the user reaches the success summary screen.
+- After final save success:
+  - mark the final pack as exported
+  - keep the Extra Vault available for upsell
+  - set Extra Vault expiry to 24 hours after final save/export success
+
+### G. Extra Vault
+
+- Extra Vault stores stickers that were replaced out of the final 16 during regeneration.
+- Start collecting Extra Vault items from the first regenerate after the initial generate.
+- Extra Vault is not a replacement picker during the main creation loop.
+- Extra Vault is shown only after final pack save/export success.
+- Extra Vault expires 24 hours after final pack save/export success.
+
+### H. Extra Pack Payment
+
+- Product ID: `extra_pack_99`
+- Price: 99 THB
+- Provider: Beam
+- The user can select up to 16 Extra Vault stickers.
+- If fewer than 16 Extra Vault stickers exist, the user can buy and export all available stickers for the same 99 THB price.
+- Extra pack export includes only the selected Extra Vault stickers.
+- Extra pack export must not include final pack stickers.
+- After selected extra stickers are exported, the extra pack flow is complete.
+
+## 2. Payment Products
+
+| Product ID | Amount | Grants |
+| --- | ---: | --- |
+| `final_pack_199` | 199 THB | Export entitlement for the current final 16 stickers |
+| `extra_pack_99` | 99 THB | Export entitlement for up to 16 selected Extra Vault stickers |
+
+Payment records should be stored as purchase history by product and cycle, not as coin top-ups.
+
+Minimum payment fields:
+
+- `payment_link_id`
+- `provider`
+- `user_id`
+- `cycle_id`
+- `product_id`
+- `amount_satang`
+- `status`
+- `provider_status`
+- `checkout_url`
+- `created_at`
+- `updated_at`
+- `paid_at`
+- `processed_at`
+
+Minimum purchase history fields:
+
+- `purchase_id`
+- `user_id`
+- `cycle_id`
+- `product_id`
+- `amount_satang`
+- `provider`
+- `payment_link_id`
+- `purchased_at`
+- `exported_at`
+
+## 3. Suggested User Cycle State
+
+Store the active creation cycle on the user document or a dedicated cycle document.
+
+Suggested fields:
+
+- `current_cycle_id`
+- `generation_count`
+- `generation_limit`
+- `generation_locked_at`
+- `generation_cooldown_until`
+- `current_stickers`
+- `current_stickers_job_id`
+- `current_stickers_updated_at`
+- `extra_vault`
+- `extra_vault_expires_at`
+- `final_pack_paid_at`
+- `final_pack_exported_at`
+- `extra_pack_paid_at`
+- `extra_pack_exported_at`
+
+`extra_vault` item fields:
+
+- `id`
+- `source_job_id`
+- `replaced_from_slot`
+- `blob_name`
+- `created_at`
+
+## 4. Key Actors and Main Actions
+
+| Actor | Role | Main Actions |
 | --- | --- | --- |
-| **User (LINE User)** | ผู้ใช้งานทั่วไปที่เข้าผ่าน LIFF | 1. **Register/Login:** เข้าผ่าน LINE และรับ Free Coins.<br>2. **Top-up:** เติมเงินผ่าน Omise.<br>3. **Generate:** อัปโหลดรูปและกดสร้างสติกเกอร์ (เสีย 1 Coin).<br>4. **Download:** ดาวน์โหลดรูป (ถ้า `total_spent` >= 30). |
-| **LIFF Client (Frontend)** | Web App ที่รันบน LINE | 1. แสดงผล UI และ Preview รูป.<br>2. ส่ง Access Token ให้ Backend ตรวจสอบ.<br>3. เรียก Omise JS เพื่อสร้าง Payment Token. |
-| **Cloud Run (Backend)** | ศูนย์กลางการประมวลผล | 1. **Auth & Logic:** ตรวจสอบสิทธิ์และตัด Coin.<br>2. **Orchestrator:** เรียก Vertex AI และจัดการ Prompt.<br>3. **Image Processor:** ลบพื้นหลัง (rembg) และใส่ขอบขาว.<br>4. **Webhook Handler:** รับสถานะการจ่ายเงินจาก Omise. |
-| **AI Agents (Vertex AI)** | Engine ในการสร้างภาพ | 1. รับ Image + Prompt.<br>2. สร้างภาพ 4x4 Grid ตาม Style ที่กำหนด. |
-| **Payment Gateway (Omise)** | ผู้ให้บริการรับชำระเงิน | 1. ตัดบัตรเครดิต/QR Code.<br>2. ส่ง Webhook ยืนยันยอดเงินกลับมาที่ Backend. |
+| User | LINE user creating stickers | Login, upload selfie, generate, keep stickers, regenerate, pay, save final pack, optionally buy extras |
+| LIFF Client | Mobile-first web app inside LINE | Show UI, collect user input, display counters/warnings, call backend, redirect to Beam, trigger save/export |
+| Backend API | Source of truth for state and access | Validate auth, increment generation count, enforce limits, manage cycle state, create Beam links, process webhooks, authorize exports |
+| AI Service | Sticker generation engine | Generate 4x4 sticker grids from user image and prompt |
+| Image Processor | Backend image pipeline | Split grid, remove background, add stroke, save processed stickers |
+| GCS | Sticker asset storage | Store current final stickers and Extra Vault images with lifecycle/expiry policy |
+| Beam | Payment gateway | Collect payment and send payment status back to backend |
 
-### 3. Data Flow Overview (Mermaid.js Flowchart)
+## 5. Main Data Flow
 
-แผนภาพนี้แสดงการไหลของข้อมูลใน 2 Flow หลักคือ **Generation Flow** (การสร้าง) และ **Payment Flow** (การเงิน)
-
+```mermaid
 flowchart TD
-    %% Define Styles
-    classDef user fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef system fill:#d1e7dd,stroke:#333,stroke-width:2px;
-    classDef external fill:#fff3cd,stroke:#333,stroke-width:2px;
-    classDef db fill:#cfe2ff,stroke:#333,stroke-width:2px;
+    User((User / LIFF))
+    Frontend[LIFF Frontend]
+    Backend[Cloud Run API]
+    Firestore[(Firestore)]
+    GCS[(Cloud Storage)]
+    AI[AI Generation Service]
+    Beam[Beam Payment]
 
-    User((User / LIFF)):::user
-    Backend[Cloud Run API]:::system
-    Firestore[(Firestore DB)]:::db
-    GCS[(Cloud Storage)]:::db
-    VertexAI[Vertex AI \Gemini 3.0 P.]:::external
-    Omise[Omise Gateway]:::external
+    User --> Frontend
+    Frontend -- Sync LINE profile --> Backend
+    Backend -- Create or update user --> Firestore
 
-    %% Onboarding
-    User -- 1. Open LIFF (Check/Create) --> Backend
-    Backend -- 1.1 Get/Set User Data --> Firestore
-    Backend -- 1.2 Free Coin logic --> Firestore
+    Frontend -- Generate or Regenerate --> Backend
+    Backend -- Atomically increment generation_count --> Firestore
+    Backend -- Check limit and cooldown --> Firestore
 
-    %% Generation Flow
-    User -- 2. Upload Photo & Request Gen --> Backend
-    Backend -- 2.1 Atomic Deduct (-1 Coin) --> Firestore
-    Firestore -- 2.2 Success/Fail --> Backend
-    
-    subgraph "AI Processing"
-    Backend -- 2.3 Send Image + Prompt --> VertexAI
-    VertexAI -- 2.4 Return 4x4 Grid (#00FF00) --> Backend
-    Backend -- 2.5 Remove BG & Add Stroke (Python) --> Backend
-    Backend -- 2.6 Save Result (Exp 24h) --> GCS
-    end
-    
-    GCS -- 2.7 Signed URL --> Backend
-    Backend -- 2.8 Return Preview URL --> User
+    Backend -- If allowed, request sticker grid --> AI
+    AI -- Return 4x4 grid --> Backend
+    Backend -- Process images and save stickers --> GCS
+    Backend -- Update final stickers and Extra Vault --> Firestore
+    Backend -- Return sticker URLs and warning state --> Frontend
 
-    %% Payment Flow
-    User -- 3. Pay (Credit/QR) --> Omise
-    Omise -- 3.1 Webhook (Success) --> Backend
-    Backend -- 3.2 Update Coin & Total Spent --> Firestore
+    Frontend -- Save to Photos --> Backend
+    Backend -- If unpaid, create final_pack_199 link --> Beam
+    Beam -- Payment result webhook --> Backend
+    Backend -- Record final purchase entitlement --> Firestore
+    Frontend -- Export final 16 --> Backend
+    Backend -- Authorize final export --> GCS
+    Frontend -- Show final success and Extra Vault --> User
 
-    %% Download Flow
-    User -- 4. Request Download --> Backend
-    Backend -- 4.1 Check total_spent >= 30 --> Firestore
-    Firestore -- 4.2 Result (True/False) --> Backend
-    Backend -- 4.3 Allow/Deny --> User
+    Frontend -- Select extras and pay --> Backend
+    Backend -- Create extra_pack_99 link --> Beam
+    Beam -- Payment result webhook --> Backend
+    Backend -- Record extra purchase entitlement --> Firestore
+    Frontend -- Export selected extras --> Backend
+    Backend -- Authorize extra export --> GCS
+```
+
+## 6. Required Test Cases
+
+- Attempts 1-14 do not show warnings.
+- Attempts 15-17 show the gentle warning with correct remaining count.
+- Attempts 18-19 show the stronger warning with correct remaining count.
+- Attempt 20 blocks further generation and surfaces the 199 THB final pack.
+- Save to Photos before attempt 20 still requires `final_pack_199`.
+- A user who reaches attempt 20 and does not pay sees a 24-hour countdown.
+- After countdown ends without payment, the full cycle resets.
+- Regeneration stores replaced final stickers into Extra Vault.
+- Extra Vault is hidden before final save/export success.
+- Extra Vault is shown after final save/export success.
+- Extra Vault expires 24 hours after final save/export success.
+- Extra cart allows at most 16 selected stickers.
+- Extra cart can be purchased with fewer than 16 available stickers.
+- Extra export contains only selected Extra Vault stickers.
+- Coin balance and coin packages do not appear in the new UI.

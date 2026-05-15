@@ -14,7 +14,10 @@ def get_payment_service():
 
 class PaymentCreateRequest(BaseModel):
     user_id: str
-    package_id: str
+    product_id: str | None = None
+    package_id: str | None = None
+    cycle_id: str | None = None
+    selected_extra_ids: list[str] | None = None
 
 
 @router.post("/create", status_code=status.HTTP_201_CREATED)
@@ -25,9 +28,14 @@ async def create_payment(
 ) -> dict:
     try:
         assert_user_match(token_profile["line_id"], request.user_id)
+        product_id = request.product_id or request.package_id
+        if not product_id:
+            raise ValueError("product_id is required")
         result = await payment_service.create_payment_link(
             user_id=request.user_id,
-            package_id=request.package_id,
+            product_id=product_id,
+            cycle_id=request.cycle_id,
+            selected_extra_ids=request.selected_extra_ids,
         )
         return result
     except ValueError as ve:
