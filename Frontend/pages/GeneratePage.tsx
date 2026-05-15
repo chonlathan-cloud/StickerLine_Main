@@ -95,6 +95,7 @@ const PROMPT_CHIP_GROUPS = [
     chips: ['Thai chat captions', 'No text', 'Funny short text'],
   },
 ] as const;
+type PromptChipGroupLabel = (typeof PROMPT_CHIP_GROUPS)[number]['label'];
 
 const TEMPLATE_IMAGES = {
   MASCOT_LOGIN: '/assets/template/mascot-login.png',
@@ -171,6 +172,17 @@ const canUseNativeFileShare = () => {
   }
 };
 
+const formatUserFacingWarning = (warning?: GenerationWarning | null) => {
+  if (!warning) return null;
+  if (warning.level === 'gentle') {
+    return 'ชุดนี้ใกล้พร้อมบันทึกแล้ว คุณยังปรับและสร้างต่อได้ตามปกติ';
+  }
+  if (warning.level === 'strong') {
+    return `ใกล้ถึงช่วงปลดล็อกแล้ว เหลืออีก ${warning.remaining} ครั้งก่อนบันทึกด้วยแพ็ก 199 บาท`;
+  }
+  return 'ชุดนี้พร้อมบันทึกแล้ว ปลดล็อก 199 บาทเพื่อเซฟสติกเกอร์';
+};
+
 const shouldResumeSaveToPhotosInExternalBrowser = () => {
   const params = new URLSearchParams(window.location.search);
   return params.get(SAVE_TO_PHOTOS_PARAM) === SAVE_TO_PHOTOS_PARAM_VALUE;
@@ -217,51 +229,143 @@ const Button = ({ children, variant = 'primary', className = '', ...props }: any
 
 const Header = ({
   avatarSrc,
-  attemptLabel,
-  notificationCount,
 }: {
   avatarSrc?: string;
-  attemptLabel: string;
-  notificationCount?: number;
 }) => (
-  <header className="sticky top-0 z-50 flex items-center justify-between px-6 py-3 bg-surface border-b border-outline-variant/30 backdrop-blur-md">
+  <header className="sticky top-0 z-50 flex items-center px-6 py-3 bg-surface border-b border-outline-variant/30 backdrop-blur-md">
     <div className="flex items-center gap-3 min-w-0">
       <div className="w-10 h-10 rounded-full overflow-hidden shadow-sm shrink-0">
         <img src={avatarSrc || TEMPLATE_IMAGES.AVATAR} alt="User" className="w-full h-full object-cover" />
       </div>
       <h1 className="text-xl font-extrabold text-primary tracking-tight truncate">Mia-U-Sticker</h1>
     </div>
-    <div className="flex items-center gap-3">
-      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-secondary-container rounded-full shadow-sm">
-        <SparklesIcon className="text-on-secondary-container w-5 h-5" />
-        <span className="text-sm font-bold text-on-secondary-container">{attemptLabel}</span>
-      </div>
-      <button type="button" className="relative p-2 rounded-full hover:bg-surface-container transition-colors" aria-label="Trial notifications">
-        <NotificationIcon className="text-primary w-6 h-6" />
-        {notificationCount ? (
-          <span className="absolute top-1 right-1 min-w-4 h-4 px-1 bg-error text-on-error text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-surface">
-            {notificationCount}
-          </span>
-        ) : null}
-      </button>
-    </div>
   </header>
 );
 
 const LoadingOverlay = ({ headline, subtext, progress }: { headline: string; subtext: string; progress: number }) => (
   <div className="pointer-events-none absolute inset-0 flex items-end p-3">
-    <div className="w-full rounded-2xl bg-black/30 p-3 text-white backdrop-blur-[3px]">
-      <div className="flex items-center gap-2">
-        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" />
-        <p className="text-sm font-semibold text-white">{headline}</p>
+    <div className="relative w-full overflow-hidden rounded-2xl bg-black/35 p-3 text-white shadow-lg backdrop-blur-[4px]">
+      <motion.span
+        aria-hidden="true"
+        className="absolute right-5 top-3 h-2 w-2 rounded-full bg-secondary-container"
+        animate={{ y: [0, -5, 0], opacity: [0.35, 1, 0.35] }}
+        transition={{ duration: 1.7, repeat: Infinity, ease: 'easeInOut' }}
+      />
+      <motion.span
+        aria-hidden="true"
+        className="absolute right-10 top-8 h-1.5 w-1.5 rounded-full bg-white"
+        animate={{ y: [0, -4, 0], opacity: [0.25, 0.9, 0.25] }}
+        transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut', delay: 0.35 }}
+      />
+
+      <div className="flex items-center gap-3">
+        <motion.div
+          className="relative h-12 w-12 shrink-0 overflow-hidden rounded-2xl border-2 border-white/50 bg-white shadow-md"
+          animate={{ rotate: [-2, 2, -2], y: [0, -2, 0] }}
+          transition={{ duration: 2.1, repeat: Infinity, ease: 'easeInOut' }}
+        >
+          <img src={TEMPLATE_IMAGES.STICKERS[0]} alt="" className="h-full w-full object-contain p-1" />
+          <span className="absolute inset-x-2 bottom-1 h-1 rounded-full bg-primary/20" />
+        </motion.div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" />
+            <p className="truncate text-sm font-semibold text-white">{headline}</p>
+          </div>
+          <p className="mt-1 truncate text-xs text-white/90">{subtext}</p>
+        </div>
       </div>
-      <p className="mt-1 text-xs text-white/90">{subtext}</p>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/30">
-        <span className="block h-full rounded-full bg-secondary-container transition-all duration-500" style={{ width: `${progress}%` }} />
+
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/25">
+        <motion.span
+          className="relative block h-full rounded-full bg-ai-gradient transition-all duration-500"
+          style={{ width: `${progress}%` }}
+        >
+          <motion.span
+            aria-hidden="true"
+            className="absolute inset-y-0 left-0 w-10 bg-white/35 blur-sm"
+            animate={{ x: ['-120%', '260%'] }}
+            transition={{ duration: 1.3, repeat: Infinity, ease: 'easeInOut' }}
+          />
+        </motion.span>
       </div>
     </div>
   </div>
 );
+
+const PromptPresetTray = ({
+  prompt,
+  hasGenerated,
+  onPromptChip,
+}: {
+  prompt: string;
+  hasGenerated: boolean;
+  onPromptChip: (chip: string) => void;
+}) => {
+  const [activeGroupLabel, setActiveGroupLabel] = useState<PromptChipGroupLabel>('Scene');
+  const activeGroup = PROMPT_CHIP_GROUPS.find((group) => group.label === activeGroupLabel) ?? PROMPT_CHIP_GROUPS[1];
+  const selectedPromptParts = useMemo(
+    () => prompt.split(',').map((part) => part.trim().toLowerCase()).filter(Boolean),
+    [prompt],
+  );
+
+  return (
+    <div className="mt-4 rounded-2xl border border-border-light-purple/70 bg-white/45 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-outline">Quick ideas</p>
+        <div className="flex min-w-0 gap-1 overflow-x-auto rounded-full bg-surface-container p-1">
+          {PROMPT_CHIP_GROUPS.map((group) => {
+            const active = group.label === activeGroupLabel;
+            return (
+              <button
+                type="button"
+                key={group.label}
+                onClick={() => setActiveGroupLabel(group.label)}
+                className={`h-8 shrink-0 rounded-full px-3 text-[11px] font-extrabold transition-colors ${
+                  active
+                    ? 'bg-white text-primary shadow-sm'
+                    : 'text-on-surface-variant hover:bg-white/60'
+                }`}
+              >
+                {group.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="-mx-3 mt-3 overflow-x-auto px-3 pb-1">
+        <div className="flex w-max gap-2">
+          {activeGroup.chips.map((tag) => {
+            const selected = selectedPromptParts.includes(tag.toLowerCase());
+            return (
+              <button
+                type="button"
+                key={tag}
+                onClick={() => onPromptChip(tag)}
+                disabled={selected}
+                className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-4 text-xs font-bold transition-colors disabled:cursor-default ${
+                  selected
+                    ? 'bg-secondary-container text-on-secondary-container'
+                    : 'bg-surface-container-high text-on-surface-variant hover:bg-primary-container/10'
+                }`}
+              >
+                <SparklesIcon className="h-3.5 w-3.5" />
+                {tag}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {hasGenerated ? (
+        <p className="mt-3 rounded-xl bg-primary/5 px-3 py-2 text-xs font-bold leading-5 text-primary">
+          Tip: update details here, then regenerate only the unlocked stickers below.
+        </p>
+      ) : null}
+    </div>
+  );
+};
 
 const GeneratorView = ({
   config,
@@ -381,43 +485,11 @@ const GeneratorView = ({
           onChange={(e) => onPromptChange(e.target.value)}
         />
       </div>
-      <div className="mt-4 space-y-3">
-        {PROMPT_CHIP_GROUPS.map((group) => (
-          <div key={group.label}>
-            <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-outline">
-              {group.label}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {group.chips.map((tag) => {
-                const selected = config.extraPrompt
-                  .split(',')
-                  .map((part) => part.trim().toLowerCase())
-                  .includes(tag.toLowerCase());
-                return (
-                  <button
-                    type="button"
-                    key={tag}
-                    onClick={() => onPromptChip(tag)}
-                    disabled={selected}
-                    className={`px-4 py-1.5 rounded-full text-xs font-bold cursor-pointer transition-colors disabled:cursor-default ${
-                      selected
-                        ? 'bg-secondary-container text-on-secondary-container'
-                        : 'bg-surface-container-high text-on-surface-variant hover:bg-primary-container/10'
-                    }`}
-                  >
-                    ✨ {tag}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-        {hasGenerated ? (
-          <p className="rounded-2xl bg-primary/5 px-4 py-3 text-xs font-bold leading-5 text-primary">
-            Tip: update details here, then regenerate only the unlocked stickers below.
-          </p>
-        ) : null}
-      </div>
+      <PromptPresetTray
+        prompt={config.extraPrompt}
+        hasGenerated={hasGenerated}
+        onPromptChip={onPromptChip}
+      />
     </section>
 
     <Button className="w-full text-lg mt-4" onClick={onGenerate} disabled={loading || !canGenerate || hasGenerated}>
@@ -449,8 +521,8 @@ const LimitModal = ({
       <div className="w-20 h-20 bg-primary-container/10 rounded-full flex items-center justify-center mx-auto mb-6">
         <RobotIcon className="text-primary text-4xl animate-bounce" />
       </div>
-      <h3 className="text-2xl font-extrabold mb-2">Limit Reached! (20/20)</h3>
-      <p className="text-on-surface-variant text-sm mb-8">You've used all trial attempts for today. Unlock your final pack or wait for reset.</p>
+      <h3 className="text-2xl font-extrabold mb-2">Ready to Save</h3>
+      <p className="text-on-surface-variant text-sm mb-8">This pack is ready to unlock. Save your final stickers now or come back after the reset window.</p>
 
       <Button className="w-full mb-4" onClick={onUnlock} disabled={isOpeningPayment}>
         <PayIcon />
@@ -478,8 +550,9 @@ const AttemptWarningModal = ({
   onUnlock: () => void;
 }) => {
   const isStrong = warning.level === 'strong';
-  const title = isStrong ? 'เหลืออีกไม่กี่ครั้ง' : 'ใกล้ครบโควต้าทดลองแล้ว';
+  const title = isStrong ? 'เหลืออีกไม่กี่ครั้ง' : 'ใกล้พร้อมบันทึกแล้ว';
   const accent = isStrong ? 'bg-error-container text-on-error-container' : 'bg-primary-container/10 text-primary';
+  const message = formatUserFacingWarning(warning);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
@@ -493,12 +566,14 @@ const AttemptWarningModal = ({
           {isStrong ? <NotificationIcon className="w-9 h-9" /> : <SparklesIcon className="w-9 h-9" />}
         </div>
         <h3 className="text-2xl font-extrabold mb-3">{title}</h3>
-        <p className="text-on-surface-variant text-sm leading-6 mb-5">{warning.message}</p>
+        <p className="text-on-surface-variant text-sm leading-6 mb-5">{message}</p>
 
-        <div className="mb-7 rounded-2xl border-2 border-border-light-purple bg-surface-container px-5 py-4">
-          <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-outline">Remaining Trial</p>
-          <p className="mt-1 text-3xl font-black text-primary tabular-nums">{warning.remaining}</p>
-        </div>
+        {isStrong ? (
+          <div className="mb-7 rounded-2xl border-2 border-border-light-purple bg-surface-container px-5 py-4">
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-outline">Remaining</p>
+            <p className="mt-1 text-3xl font-black text-primary tabular-nums">{warning.remaining}</p>
+          </div>
+        ) : null}
 
         <div className="space-y-3">
           {isStrong ? (
@@ -806,6 +881,7 @@ const SuccessView = ({
   stickerSlots,
   extraSlots,
   selectedExtraIds,
+  finalPackExported,
   extraPackPaid,
   isBusy,
   onToggleExtra,
@@ -822,6 +898,7 @@ const SuccessView = ({
   stickerSlots: StickerSlot[];
   extraSlots: ExtraSlot[];
   selectedExtraIds: string[];
+  finalPackExported: boolean;
   extraPackPaid: boolean;
   isBusy: boolean;
   onToggleExtra: (id: string) => void;
@@ -848,7 +925,11 @@ const SuccessView = ({
           </div>
         </div>
         <h2 className="text-3xl font-extrabold text-primary mb-2">Payment Success!</h2>
-        <p className="text-on-surface-variant">Your stickers are ready for the world.</p>
+        <p className="text-on-surface-variant">
+          {finalPackExported
+            ? 'Your stickers are ready for the world.'
+            : 'Your Final Pack is unlocked. Save it to your photos now.'}
+        </p>
       </section>
 
       <div className="bg-white rounded-[32px] p-6 border-2 border-border-light-purple shadow-sm space-y-6">
@@ -866,7 +947,7 @@ const SuccessView = ({
           <div className="aspect-square bg-surface-container flex items-center justify-center rounded-xl font-bold text-primary">+13</div>
         </div>
         <div className="flex flex-col gap-3">
-          <Button variant="secondary" className="w-full h-12" onClick={onDownloadFinal} disabled={isFinalSaving}>
+          <Button variant={finalPackExported ? 'secondary' : 'primary'} className="w-full h-12" onClick={onDownloadFinal} disabled={isFinalSaving}>
             {isFinalSaving ? <RefreshIcon className="animate-spin" /> : <DownloadIcon />}
             {finalDownloadLabel}
           </Button>
@@ -874,7 +955,17 @@ const SuccessView = ({
         </div>
       </div>
 
-      {extraSlots.length ? (
+      {!finalPackExported ? (
+        <section className="rounded-[32px] border-2 border-border-light-purple bg-surface-container p-6 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-primary-fixed text-primary">
+            <LockIcon className="h-7 w-7" />
+          </div>
+          <h3 className="mb-2 text-lg font-extrabold text-on-surface">Extra Vault is next</h3>
+          <p className="text-sm leading-6 text-on-surface-variant">
+            Save your Final Pack first, then your extra regenerated stickers will appear here.
+          </p>
+        </section>
+      ) : extraSlots.length ? (
         <section className="pb-32">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -917,7 +1008,7 @@ const SuccessView = ({
         </section>
       ) : null}
 
-      {extraSlots.length ? (
+      {finalPackExported && extraSlots.length ? (
         <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-md border-t border-border-light-purple z-40">
           <div className="max-w-md mx-auto flex items-center gap-4">
             <div className="flex-1">
@@ -975,6 +1066,66 @@ const SuccessView = ({
   );
 };
 
+const DoneView = ({
+  finalCount,
+  extraCount,
+  isBusy,
+  onCreateNewPack,
+  onOpenStickerMaker,
+}: {
+  finalCount: number;
+  extraCount: number;
+  isBusy: boolean;
+  onCreateNewPack: () => void;
+  onOpenStickerMaker: () => void;
+}) => (
+  <div className="flex min-h-screen flex-col gap-8 p-6">
+    <section className="mt-8 text-center">
+      <div className="relative mx-auto mb-8 flex h-36 w-36 items-center justify-center rounded-full bg-success-teal/10 shadow-inner">
+        <img src={TEMPLATE_IMAGES.CELEBRATION} alt="All done" className="h-28 w-28 rounded-full object-cover shadow-lg" />
+        <div className="absolute -right-1 bottom-2 flex h-12 w-12 items-center justify-center rounded-full bg-success-teal text-white shadow-lg">
+          <CheckIcon className="h-7 w-7" />
+        </div>
+      </div>
+      <h2 className="mb-2 text-3xl font-extrabold text-primary">All Set!</h2>
+      <p className="text-sm leading-6 text-on-surface-variant">
+        Your Final Pack and Extra Vault are saved. Start a fresh sticker pack whenever you are ready.
+      </p>
+    </section>
+
+    <section className="rounded-[32px] border-2 border-border-light-purple bg-white p-6 shadow-sm">
+      <div className="space-y-4">
+        {[
+          { label: 'Final Pack saved', value: `${finalCount || DEFAULT_STICKER_COUNT} stickers` },
+          { label: 'Extra Vault saved', value: `${extraCount} extras` },
+          { label: 'Next pack', value: 'Ready for a fresh set' },
+        ].map((item) => (
+          <div key={item.label} className="flex items-center justify-between gap-4 rounded-2xl bg-surface-container px-4 py-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-fixed text-primary">
+                <CheckIcon className="h-4 w-4" />
+              </span>
+              <p className="font-bold text-on-surface">{item.label}</p>
+            </div>
+            <p className="text-right text-xs font-bold text-on-surface-variant">{item.value}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <div className="mt-auto flex flex-col gap-3 pb-8">
+      <Button className="w-full py-6 text-lg" onClick={onCreateNewPack} disabled={isBusy}>
+        {isBusy ? <RefreshIcon className="animate-spin" /> : <SparklesIcon />}
+        {isBusy ? 'Starting...' : 'Create New Pack'}
+      </Button>
+      <Button variant="line" className="w-full h-12 text-sm" onClick={onOpenStickerMaker} disabled={isBusy}>
+        <LineIcon />
+        Open LINE Sticker Maker
+      </Button>
+    </div>
+  </div>
+);
+
 const GeneratePage: React.FC = () => {
   const isOnline = useOnlineStatus();
   const { profile } = useAuth();
@@ -1001,6 +1152,7 @@ const GeneratePage: React.FC = () => {
   const [isCreatingPayment, setIsCreatingPayment] = useState<PaymentProductId | null>(null);
   const [isSavingFinal, setIsSavingFinal] = useState(false);
   const [isExtraExporting, setIsExtraExporting] = useState(false);
+  const [isResettingPack, setIsResettingPack] = useState(false);
   const [dismissedLimit, setDismissedLimit] = useState(false);
   const [warningPopup, setWarningPopup] = useState<GenerationWarning | null>(null);
   const [clockTick, setClockTick] = useState(0);
@@ -1081,12 +1233,10 @@ const GeneratePage: React.FC = () => {
     clearSaveToPhotosIntent();
   }, []);
 
-  const attemptCount = generationState?.generation_count ?? 0;
-  const attemptLimit = generationState?.generation_limit ?? 20;
-  const remainingAttempts = generationState?.remaining_attempts ?? attemptLimit;
   const finalPackPaid = Boolean(generationState?.final_pack_paid);
   const finalPackExported = Boolean(generationState?.final_pack_exported);
   const extraPackPaid = Boolean(generationState?.extra_pack_paid);
+  const extraPackExported = Boolean(generationState?.extra_pack_exported);
   const isGenerationLocked = Boolean(generationState?.is_generation_locked);
   const cooldownLabel = useMemo(
     () => formatCountdown(generationState?.generation_cooldown_until),
@@ -1095,25 +1245,23 @@ const GeneratePage: React.FC = () => {
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
   const unlockedCount = stickerSlots.length ? stickerSlots.length - lockedCount : DEFAULT_STICKER_COUNT;
   const canGenerate = Boolean(config.base64Image) && !isGenerationLocked && !(finalPackPaid && !finalPackExported);
-  const attemptLabel = `${attemptCount}/${attemptLimit}`;
-  const notificationCount = generationState?.warning?.remaining != null ? Math.max(0, generationState.warning.remaining) : undefined;
 
   const loadingHeadline =
     processingStep === 'analyzing'
-      ? 'Analyzing selfie'
+      ? 'Reading selfie magic'
       : processingStep === 'generating'
-        ? `Generating ${simulatedStickerCount}/${generationTargetCount}`
+        ? `Drawing tiny mood ${simulatedStickerCount}/${generationTargetCount}`
         : processingStep === 'removing'
-          ? 'Preparing transparent PNG'
+          ? 'Polishing transparent PNGs'
           : 'Ready';
 
   const loadingSubtext =
     processingStep === 'analyzing'
-      ? 'Checking face detail and prompt safety'
+      ? 'Finding the cutest angles'
       : processingStep === 'generating'
-        ? 'Rendering your sticker set'
+        ? 'Cooking expressive sticker poses'
         : processingStep === 'removing'
-          ? 'Cleaning background for LINE-ready assets'
+          ? 'Packing everything for LINE-ready save'
           : 'Ready';
 
   const simulatedProgress =
@@ -1127,18 +1275,18 @@ const GeneratePage: React.FC = () => {
             ? 100
             : 0;
 
-  const helperText = generationState?.warning?.message
+  const helperText = formatUserFacingWarning(generationState?.warning)
     || (isGenerationLocked ? `Reset in ${cooldownLabel ?? '24h'} or unlock the final pack.` : null);
 
-  const currentView: 'workspace' | 'checkout' | 'success' = checkoutProduct
+  const currentView: 'workspace' | 'checkout' | 'success' | 'done' = checkoutProduct
     ? 'checkout'
-    : finalPackExported
-      ? 'success'
+    : finalPackExported && extraPackExported
+      ? 'done'
       : finalPackPaid
-        ? 'checkout'
-        : 'workspace';
+      ? 'success'
+      : 'workspace';
 
-  const activeCheckoutProduct = checkoutProduct ?? (finalPackPaid && !finalPackExported ? 'final_pack_199' : null);
+  const activeCheckoutProduct = checkoutProduct;
 
   const openImagePicker = () => fileInputRef.current?.click();
 
@@ -1496,6 +1644,39 @@ const GeneratePage: React.FC = () => {
     }
   };
 
+  const handleCreateNewPack = async () => {
+    if (!profile?.userId) return;
+    try {
+      setIsResettingPack(true);
+      setError(null);
+      await resetCurrentStickers(profile.userId);
+      setConfig({
+        base64Image: '',
+        size: '2K',
+        aspectRatio: '1:1',
+        extraPrompt: '',
+        style: 'Pixar 3D',
+      });
+      setStickerSlots([]);
+      setExtraSlots([]);
+      setSelectedExtraIds([]);
+      setGenerationState(null);
+      setCheckoutProduct(null);
+      setGenerationTargetCount(DEFAULT_STICKER_COUNT);
+      setProcessingStep('idle');
+      setDismissedLimit(false);
+      setWarningPopup(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || err?.message || 'Could not start a new pack.');
+    } finally {
+      setIsResettingPack(false);
+    }
+  };
+
   const handleOpenStickerMaker = () => {
     window.open('https://creator.line.me/stickermaker/', '_blank', 'noopener,noreferrer');
   };
@@ -1517,12 +1698,25 @@ const GeneratePage: React.FC = () => {
       );
     }
 
+    if (currentView === 'done') {
+      return (
+        <DoneView
+          finalCount={stickerSlots.length || DEFAULT_STICKER_COUNT}
+          extraCount={generationState?.extra_pack_selected_ids?.length || extraSlots.length}
+          isBusy={isResettingPack}
+          onCreateNewPack={handleCreateNewPack}
+          onOpenStickerMaker={handleOpenStickerMaker}
+        />
+      );
+    }
+
     if (currentView === 'success') {
       return (
         <SuccessView
           stickerSlots={stickerSlots}
           extraSlots={extraSlots}
           selectedExtraIds={selectedExtraIds}
+          finalPackExported={finalPackExported}
           extraPackPaid={extraPackPaid}
           isBusy={isCreatingPayment === 'extra_pack_99' || isExtraExporting}
           onToggleExtra={toggleExtraSelection}
@@ -1530,8 +1724,8 @@ const GeneratePage: React.FC = () => {
           onClearExtras={() => setSelectedExtraIds([])}
           onPayExtra={handleBuyExtraPack}
           onDownloadExtras={handleDownloadExtras}
-          onDownloadFinal={handleDownloadFinalAgain}
-          finalDownloadLabel={isMobileDevice() ? 'Save to Photos' : 'Download ZIP'}
+          onDownloadFinal={finalPackExported ? handleDownloadFinalAgain : handleSaveFinalPack}
+          finalDownloadLabel={finalPackExported ? (isMobileDevice() ? 'Save to Photos' : 'Download ZIP') : 'Save to Photos'}
           extraDownloadLabel={isMobileDevice() ? 'Save to Photos' : 'Download ZIP'}
           isFinalSaving={isSavingFinal}
           onOpenStickerMaker={handleOpenStickerMaker}
@@ -1577,8 +1771,6 @@ const GeneratePage: React.FC = () => {
       {currentView !== 'checkout' ? (
         <Header
           avatarSrc={profile?.pictureUrl}
-          attemptLabel={attemptLabel}
-          notificationCount={notificationCount}
         />
       ) : null}
 

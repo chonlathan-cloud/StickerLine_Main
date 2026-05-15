@@ -38,18 +38,18 @@ const PRODUCT_COPY: Record<PaymentProductId, { title: string; price: string; des
     title: 'Final Pack',
     price: '199 THB',
     description: 'Unlock saving the final 16 stickers for this round.',
-    success: 'Final Pack unlocked. Return to save your stickers.',
+    success: 'Payment successful. Taking you to Save to Photos...',
   },
   extra_pack_99: {
     title: 'Extra Vault',
     price: '99 THB',
     description: 'Unlock export for selected Extra Vault stickers.',
-    success: 'Extra Vault unlocked. Return to download selected extras.',
+    success: 'Payment successful. Taking you to Extra Vault...',
   },
 };
 
 const STICKER_PACK = '/assets/template/sticker-pack.png';
-const AUTO_REDIRECT_DELAY_MS = 1500;
+const AUTO_REDIRECT_DELAY_MS = 500;
 
 const Button = ({ children, variant = 'primary', className = '', ...props }: any) => {
   const base = 'h-[52px] px-8 rounded-full font-bold flex items-center justify-center gap-2 transition-all active:scale-95 duration-200 disabled:cursor-not-allowed disabled:opacity-50';
@@ -66,11 +66,21 @@ const Button = ({ children, variant = 'primary', className = '', ...props }: any
   );
 };
 
+const readPaymentIdFromUrl = () => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('payment_link_id')
+    || params.get('paymentLinkId')
+    || params.get('charge_id')
+    || params.get('chargeId')
+    || params.get('sourceId')
+    || params.get('id');
+};
+
 const readPendingPayment = (): PendingPaymentState => {
   try {
     const productId = localStorage.getItem(PENDING_PRODUCT_ID_KEY) as PaymentProductId | null;
     return {
-      paymentLinkId: localStorage.getItem(PENDING_PAYMENT_ID_KEY),
+      paymentLinkId: readPaymentIdFromUrl() || localStorage.getItem(PENDING_PAYMENT_ID_KEY),
       checkoutUrl: localStorage.getItem(PENDING_CHECKOUT_URL_KEY),
       productId: productId && PRODUCT_COPY[productId] ? productId : null,
       expiresAt: localStorage.getItem(PENDING_EXPIRES_AT_KEY),
@@ -105,6 +115,8 @@ const PaymentPage: React.FC = () => {
   const productCopy = productId ? PRODUCT_COPY[productId] : null;
   const expiryLabel = useMemo(() => formatDateTime(expiresAt), [expiresAt]);
   const isExtra = productId === 'extra_pack_99';
+  const isSuccess = status === 'success';
+  const continueLabel = isExtra ? 'Go to Extra Vault' : 'Go to Save to Photos';
 
   const hydratePendingPayment = () => {
     const pending = readPendingPayment();
@@ -162,7 +174,7 @@ const PaymentPage: React.FC = () => {
 
   useEffect(() => {
     if (status !== 'success') return;
-    const timeout = window.setTimeout(() => navigate('/generate'), AUTO_REDIRECT_DELAY_MS);
+    const timeout = window.setTimeout(() => navigate('/generate', { replace: true }), AUTO_REDIRECT_DELAY_MS);
     return () => window.clearTimeout(timeout);
   }, [navigate, status]);
 
@@ -203,7 +215,7 @@ const PaymentPage: React.FC = () => {
         <div className="flex flex-col gap-8 p-6 max-w-md mx-auto">
           <div className="flex items-center justify-between">
             <Button variant="ghost" className="p-0 h-10 w-10" onClick={() => navigate('/generate')}><BackIcon /></Button>
-            <h2 className="text-xl font-extrabold text-primary">Unlock Pack</h2>
+            <h2 className="text-xl font-extrabold text-primary">{isSuccess ? 'Payment Success' : 'Unlock Pack'}</h2>
             <Button variant="ghost" className="p-0 h-10 w-10" onClick={() => navigate('/generate')}><CloseIcon /></Button>
           </div>
 
@@ -214,13 +226,13 @@ const PaymentPage: React.FC = () => {
                 {status === 'success' ? <CheckIcon className="text-on-secondary-container" /> : <StarIcon className="text-on-secondary-container" />}
               </div>
             </div>
-            <h3 className="text-2xl font-extrabold mb-2">{productCopy?.title ?? 'Payment Status'}</h3>
+            <h3 className="text-2xl font-extrabold mb-2">{isSuccess ? 'Payment Success!' : productCopy?.title ?? 'Payment Status'}</h3>
             <div className="px-8 py-2 bg-surface-container rounded-full border-2 border-border-light-purple">
               <span className="text-3xl font-black text-ai-gradient italic">{productCopy?.price ?? 'Beam'}</span>
             </div>
             <p className="mt-4 text-sm text-on-surface-variant">
-              {status === 'success'
-                ? productCopy?.success ?? 'Payment successful. Returning to Generate...'
+              {isSuccess
+                ? productCopy?.success ?? 'Payment successful. Continue to your stickers.'
                 : productCopy?.description ?? 'Start payment from Generate or Extra Vault.'}
             </p>
             {expiryLabel ? <p className="mt-2 text-xs text-outline">Expires: {expiryLabel}</p> : null}
@@ -258,9 +270,9 @@ const PaymentPage: React.FC = () => {
               </Button>
             ) : null}
 
-            <Button variant={status === 'success' ? 'primary' : 'secondary'} className="w-full" onClick={() => navigate('/generate')}>
-              {status === 'success' ? <DownloadIcon /> : <BackIcon />}
-              {status === 'success' ? 'Continue' : 'Back to Generate'}
+            <Button variant={isSuccess ? 'primary' : 'secondary'} className="w-full" onClick={() => navigate('/generate')}>
+              {isSuccess ? <DownloadIcon /> : <BackIcon />}
+              {isSuccess ? continueLabel : 'Back to Generate'}
             </Button>
 
             {(status === 'failed' || status === 'pending') && paymentLinkId ? (
