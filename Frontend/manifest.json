@@ -1,12 +1,12 @@
 
 {
-  "name": "Sticker Line Studio",
-  "short_name": "StickerStudio",
+  "name": "Mia-U-Sticker",
+  "short_name": "Mia-U",
   "description": "Professional-grade sticker generator for LINE and messaging apps.",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#000000",
-  "theme_color": "#6366f1",
+  "background_color": "#fef7ff",
+  "theme_color": "#7c3aed",
   "orientation": "portrait",
   "icons": [
     {

@@ -1,16 +1,27 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import {
-  clearPendingPayment,
-  getPaymentStatus,
+  ArrowLeft as BackIcon,
+  CheckCircle2 as CheckIcon,
+  CreditCard as PaymentsIcon,
+  Download as DownloadIcon,
+  Heart as HeartIcon,
+  Monitor as HighQualityIcon,
+  RefreshCw as RefreshIcon,
+  ShoppingCart as PayIcon,
+  Star as StarIcon,
+  Unlock as UnlockIcon,
+  X as CloseIcon,
+} from 'lucide-react';
+import {
   PaymentProductId,
   PENDING_CHECKOUT_URL_KEY,
   PENDING_EXPIRES_AT_KEY,
   PENDING_PAYMENT_ID_KEY,
   PENDING_PRODUCT_ID_KEY,
+  clearPendingPayment,
+  getPaymentStatus,
 } from '../api/client';
-import { PageLayout } from '../components/PageLayout';
-import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
 
 type PaymentFlowStatus = 'idle' | 'checking' | 'pending' | 'success' | 'failed';
@@ -22,20 +33,38 @@ type PendingPaymentState = {
   expiresAt: string | null;
 };
 
-const PRODUCT_COPY: Record<PaymentProductId, { title: string; description: string; success: string }> = {
+const PRODUCT_COPY: Record<PaymentProductId, { title: string; price: string; description: string; success: string }> = {
   final_pack_199: {
-    title: 'Final pack 199 THB',
-    description: 'ปลดล็อกการบันทึก final 16 stickers สำหรับรอบนี้',
-    success: 'ปลดล็อก final pack แล้ว กลับไปบันทึกรูปต่อได้เลย',
+    title: 'Final Pack',
+    price: '199 THB',
+    description: 'Unlock saving the final 16 stickers for this round.',
+    success: 'Final Pack unlocked. Return to save your stickers.',
   },
   extra_pack_99: {
-    title: 'Extra pack 99 THB',
-    description: 'ปลดล็อกการ export Extra Vault ที่เลือกไว้ สูงสุด 16 รูป',
-    success: 'ปลดล็อก extra pack แล้ว กลับไปดาวน์โหลดรูปที่เลือกไว้ได้เลย',
+    title: 'Extra Vault',
+    price: '99 THB',
+    description: 'Unlock export for selected Extra Vault stickers.',
+    success: 'Extra Vault unlocked. Return to download selected extras.',
   },
 };
 
+const STICKER_PACK = '/assets/template/sticker-pack.png';
 const AUTO_REDIRECT_DELAY_MS = 1500;
+
+const Button = ({ children, variant = 'primary', className = '', ...props }: any) => {
+  const base = 'h-[52px] px-8 rounded-full font-bold flex items-center justify-center gap-2 transition-all active:scale-95 duration-200 disabled:cursor-not-allowed disabled:opacity-50';
+  const variants: Record<string, string> = {
+    primary: 'bg-ai-gradient text-white shadow-[0_4px_12px_rgba(124,58,237,0.3)] hover:opacity-90',
+    secondary: 'bg-surface-container text-on-surface border-2 border-border-light-purple hover:bg-surface-container-high',
+    ghost: 'text-on-surface-variant hover:bg-surface-container',
+  };
+
+  return (
+    <button className={`${base} ${variants[variant]} ${className}`} {...props}>
+      {children}
+    </button>
+  );
+};
 
 const readPendingPayment = (): PendingPaymentState => {
   try {
@@ -55,14 +84,13 @@ const formatDateTime = (value?: string | null) => {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  return new Intl.DateTimeFormat('th-TH', {
+  return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date);
 };
 
 const PaymentPage: React.FC = () => {
-  const isOnline = useOnlineStatus();
   const { isAuthenticated, isReady, refreshProfile } = useAuth();
   const navigate = useNavigate();
 
@@ -72,11 +100,11 @@ const PaymentPage: React.FC = () => {
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [status, setStatus] = useState<PaymentFlowStatus>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [showReference, setShowReference] = useState(false);
 
   const shouldRedirect = isReady && !isAuthenticated;
   const productCopy = productId ? PRODUCT_COPY[productId] : null;
   const expiryLabel = useMemo(() => formatDateTime(expiresAt), [expiresAt]);
+  const isExtra = productId === 'extra_pack_99';
 
   const hydratePendingPayment = () => {
     const pending = readPendingPayment();
@@ -112,11 +140,11 @@ const PaymentPage: React.FC = () => {
 
       setStatus(result.status === 'failed' ? 'failed' : 'pending');
       if (result.status === 'failed') {
-        setError('รายการชำระเงินนี้ยังไม่สำเร็จหรือหมดอายุแล้ว กรุณากลับไปเริ่มจากหน้าสร้างสติกเกอร์อีกครั้ง');
+        setError('This Beam payment is not successful or has expired. Please return to Generate and start again.');
       }
     } catch (err: any) {
       setStatus('failed');
-      setError(err?.response?.data?.detail || err?.message || 'ไม่สามารถตรวจสอบสถานะการชำระเงินได้');
+      setError(err?.response?.data?.detail || err?.message || 'Could not verify Beam payment status.');
     }
   };
 
@@ -151,119 +179,100 @@ const PaymentPage: React.FC = () => {
     setExpiresAt(null);
     setStatus('idle');
     setError(null);
-    setShowReference(false);
   };
 
   if (shouldRedirect) {
     return <Navigate to="/login" replace />;
   }
 
+  const features = isExtra
+    ? [
+        { icon: <HeartIcon />, text: 'Unlock selected hidden gems' },
+        { icon: <HighQualityIcon />, text: 'High-resolution extra export' },
+        { icon: <UnlockIcon />, text: 'Separate from Final Pack' },
+      ]
+    : [
+        { icon: <HeartIcon />, text: 'Save all 16 unique stickers' },
+        { icon: <HighQualityIcon />, text: 'High-resolution export' },
+        { icon: <UnlockIcon />, text: 'Continue to Save to Photos' },
+      ];
+
   return (
-    <PageLayout isOnline={isOnline}>
-      <main className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-4 pb-12 pt-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-600">Secure Payment</p>
-          <h1 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">
-            {productCopy?.title ?? 'Payment status'}
-          </h1>
-          <p className="mt-2 text-sm leading-6 text-slate-600">
-            {productCopy?.description ?? 'รายการชำระเงินจะเริ่มจากปุ่ม Save หรือ Extra Vault ในหน้าสร้างสติกเกอร์'}
-          </p>
-        </section>
+    <div className="min-h-screen bg-background font-sans text-on-background selection:bg-primary selection:text-white">
+      <main className="max-w-xl mx-auto pb-12 overflow-x-hidden">
+        <div className="flex flex-col gap-8 p-6 max-w-md mx-auto">
+          <div className="flex items-center justify-between">
+            <Button variant="ghost" className="p-0 h-10 w-10" onClick={() => navigate('/generate')}><BackIcon /></Button>
+            <h2 className="text-xl font-extrabold text-primary">Unlock Pack</h2>
+            <Button variant="ghost" className="p-0 h-10 w-10" onClick={() => navigate('/generate')}><CloseIcon /></Button>
+          </div>
 
-        <section className="rounded-[28px] border border-emerald-200 bg-emerald-50/80 p-6 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">Payment Status</p>
-          <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">
-            {status === 'success'
-              ? 'ชำระเงินสำเร็จ'
-              : status === 'failed'
-                ? 'รายการชำระเงินมีปัญหา'
-                : status === 'checking'
-                  ? 'กำลังตรวจสอบสถานะ'
-                  : paymentLinkId
-                    ? 'มีรายการชำระเงินรอดำเนินการ'
-                    : 'ยังไม่มีรายการชำระเงิน'}
-          </h2>
-          <p className="mt-2 text-sm leading-6 text-slate-600">
-            {status === 'success'
-              ? productCopy?.success ?? 'ชำระเงินสำเร็จแล้ว กำลังพากลับไปหน้าสร้างสติกเกอร์'
-              : paymentLinkId
-                ? 'ถ้าชำระเงินแล้ว กดตรวจสอบสถานะอีกครั้ง ระบบจะเช็กกับ Beam โดยตรง'
-                : 'กลับไปที่หน้าสร้างสติกเกอร์ แล้วกด Save หรือเลือก Extra Vault เพื่อเริ่มชำระเงิน'}
-          </p>
+          <div className="flex flex-col items-center text-center">
+            <div className="w-48 h-48 rounded-[40px] bg-white border-4 border-border-light-purple shadow-xl mb-6 relative overflow-hidden flex items-center justify-center p-4">
+              <img src={STICKER_PACK} alt="Pack" className="w-full h-full object-contain" />
+              <div className="absolute -top-2 -right-2 bg-secondary-container p-2 rounded-full shadow-lg rotate-12">
+                {status === 'success' ? <CheckIcon className="text-on-secondary-container" /> : <StarIcon className="text-on-secondary-container" />}
+              </div>
+            </div>
+            <h3 className="text-2xl font-extrabold mb-2">{productCopy?.title ?? 'Payment Status'}</h3>
+            <div className="px-8 py-2 bg-surface-container rounded-full border-2 border-border-light-purple">
+              <span className="text-3xl font-black text-ai-gradient italic">{productCopy?.price ?? 'Beam'}</span>
+            </div>
+            <p className="mt-4 text-sm text-on-surface-variant">
+              {status === 'success'
+                ? productCopy?.success ?? 'Payment successful. Returning to Generate...'
+                : productCopy?.description ?? 'Start payment from Generate or Extra Vault.'}
+            </p>
+            {expiryLabel ? <p className="mt-2 text-xs text-outline">Expires: {expiryLabel}</p> : null}
+          </div>
 
-          {expiryLabel ? (
-            <p className="mt-3 text-xs font-medium text-slate-500">หมดอายุ: {expiryLabel}</p>
+          <div className="bg-surface-container rounded-[32px] p-6 border-2 border-border-light-purple space-y-4">
+            {features.map((feature, index) => (
+              <div key={index} className="flex items-center gap-4">
+                <div className="w-10 h-10 rounded-full bg-primary-fixed flex items-center justify-center text-primary">
+                  {feature.icon}
+                </div>
+                <p className="font-bold text-on-surface">{feature.text}</p>
+              </div>
+            ))}
+          </div>
+
+          {error ? (
+            <div className="rounded-2xl border border-error-container bg-error-container p-4 text-sm font-bold text-on-error-container" role="alert">
+              {error}
+            </div>
           ) : null}
 
-          <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-            {status !== 'success' && paymentLinkId ? (
-              <button
-                type="button"
-                onClick={() => handleCheckStatus()}
-                disabled={status === 'checking'}
-                className="focus-ring min-h-12 rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {status === 'checking' ? 'กำลังตรวจสอบ...' : 'ฉันชำระเงินแล้ว'}
-              </button>
+          <div className="mt-auto flex flex-col gap-3">
+            {paymentLinkId && status !== 'success' ? (
+              <Button className="w-full py-6 text-xl" onClick={() => handleCheckStatus()} disabled={status === 'checking'}>
+                {status === 'checking' ? <RefreshIcon className="animate-spin" /> : <PaymentsIcon />}
+                {status === 'checking' ? 'Checking Beam...' : 'I Paid with Beam'}
+              </Button>
             ) : null}
 
             {checkoutUrl && status !== 'success' ? (
-              <button
-                type="button"
-                onClick={handleResumeCheckout}
-                className="focus-ring min-h-12 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-bold text-slate-700 transition hover:border-emerald-300"
-              >
-                กลับไปหน้าชำระเงิน
-              </button>
+              <Button variant="secondary" className="w-full" onClick={handleResumeCheckout}>
+                <PayIcon />
+                Back to Beam Checkout
+              </Button>
             ) : null}
 
-            <button
-              type="button"
-              onClick={() => navigate('/generate')}
-              className="focus-ring min-h-12 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-bold text-slate-700 transition hover:border-sky-300"
-            >
-              กลับไปหน้าสร้างสติกเกอร์
-            </button>
+            <Button variant={status === 'success' ? 'primary' : 'secondary'} className="w-full" onClick={() => navigate('/generate')}>
+              {status === 'success' ? <DownloadIcon /> : <BackIcon />}
+              {status === 'success' ? 'Continue' : 'Back to Generate'}
+            </Button>
 
             {(status === 'failed' || status === 'pending') && paymentLinkId ? (
-              <button
-                type="button"
-                onClick={handleResetPending}
-                className="focus-ring min-h-12 rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-bold text-slate-700 transition hover:border-rose-300"
-              >
-                ล้างรายการนี้
+              <button type="button" onClick={handleResetPending} className="text-on-surface-variant font-bold text-sm">
+                Clear this payment reference
               </button>
             ) : null}
+            <p className="text-center text-xs text-on-surface-variant mt-1 opacity-70">Secure payment powered by Beam.</p>
           </div>
-
-          {paymentLinkId ? (
-            <div className="mt-4 border-t border-emerald-200 pt-4">
-              <button
-                type="button"
-                onClick={() => setShowReference((prev) => !prev)}
-                className="text-sm font-bold text-slate-700 underline decoration-slate-300 underline-offset-4"
-              >
-                {showReference ? 'ซ่อนข้อมูลอ้างอิงรายการ' : 'ดูข้อมูลอ้างอิงรายการ'}
-              </button>
-              {showReference ? (
-                <div className="mt-3 rounded-2xl border border-emerald-200 bg-white/90 p-4 text-xs text-slate-500">
-                  <p>Payment Link ID</p>
-                  <p className="mt-1 break-all font-semibold text-slate-700">{paymentLinkId}</p>
-                  {productId ? <p className="mt-3">Product: {productId}</p> : null}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </section>
-
-        {error ? (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-800 shadow-sm" role="alert">
-            {error}
-          </div>
-        ) : null}
+        </div>
       </main>
-    </PageLayout>
+    </div>
   );
 };
 

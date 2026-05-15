@@ -1,53 +1,64 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import {
+  ArrowLeft as BackIcon,
+  Bell as NotificationIcon,
+  Bot as RobotIcon,
+  CheckCircle2 as CheckIcon,
+  CreditCard as PaymentsIcon,
+  Download as DownloadIcon,
+  Heart as HeartIcon,
+  Lock as LockIcon,
+  MessageCircle as LineIcon,
+  Monitor as HighQualityIcon,
+  RotateCcw as RefreshIcon,
+  ShoppingCart as PayIcon,
+  Sparkles as SparklesIcon,
+  Star as StarIcon,
+  Unlock as UnlockIcon,
+  Upload as UploadIcon,
+  X as CloseIcon,
+} from 'lucide-react';
 import {
   ExtraVaultItemResponse,
   GenerationState,
   PaymentProductId,
-  persistPendingPayment,
   StickerSlotResponse,
-} from '../api/client';
-import { StickerStyle, StickerSheetConfig } from '../types';
-import {
   checkJobStatus,
   createPayment,
   downloadCurrentStickerForShare,
   finalizeCurrentStickerExport,
   getCurrentExtraVault,
-  getExtraVaultDownloadUrl,
   getCurrentStickers,
   getCurrentStickersDownloadUrl,
+  getExtraVaultDownloadUrl,
+  persistPendingPayment,
   resetCurrentStickers,
   startGeneration,
   uploadImage,
 } from '../api/client';
-import { PageLayout } from '../components/PageLayout';
+import { StickerSheetConfig, StickerStyle } from '../types';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useAuth } from '../providers/AuthProvider';
 
 type ProcessingStep = 'idle' | 'analyzing' | 'generating' | 'removing' | 'complete';
 
-const DEFAULT_STICKER_COUNT = 16;
-const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
-const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
-const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
-const DOWNLOAD_DELAY_MS = 180;
-const PROMPT_GUIDE_SEEN_KEY = 'stickerline_prompt_guide_seen';
-const PROMPT_GUIDE_EXAMPLE =
-  'ทำสติ๊กเกอร์แมวออฟฟิศ อารมณ์เหนื่อย เครียด รีบ งง ดีใจ มี laptop เอกสาร ไฟไหม้ ใช้ caption ภาษาไทยสั้น ๆ แนวแชท อ่านง่าย ตัวละครเด่นชัดทุกภาพ';
-
-interface StickerSlot {
+type StickerSlot = {
   id: string;
   url: string;
   locked: boolean;
-}
-interface ExtraPickSlot {
+};
+
+type ExtraSlot = {
   id: string;
   replacedFromSlot: number | null;
   url: string | null;
   createdAt?: string | null;
-}
+};
 
-interface CurrentGenerationPayload {
+type CheckoutProduct = PaymentProductId | null;
+
+type CurrentGenerationPayload = {
   status: 'ok' | 'empty';
   job_id?: string | null;
   sticker_count?: number;
@@ -55,9 +66,34 @@ interface CurrentGenerationPayload {
   generation_state?: GenerationState;
   extra_vault_count?: number;
   extra_vault?: ExtraVaultItemResponse[];
-  extra_pick_count?: number;
-  extra_picks_unlocked?: boolean;
-}
+};
+
+const DEFAULT_STICKER_COUNT = 16;
+const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
+const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
+const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
+const PROMPT_GUIDE_EXAMPLE =
+  'A cute office cat sticker set with tired, stressed, rushed, confused, happy moods, laptop, documents, tiny Thai chat captions, clear character, transparent background';
+
+const TEMPLATE_IMAGES = {
+  MASCOT_LOGIN: '/assets/template/mascot-login.png',
+  STICKER_PACK: '/assets/template/sticker-pack.png',
+  CELEBRATION: '/assets/template/celebration.png',
+  AVATAR: '/assets/template/avatar.png',
+  STICKERS: Array.from({ length: 16 }, (_, index) =>
+    `/assets/template/sticker-${String(index + 1).padStart(2, '0')}.png`,
+  ),
+};
+
+const STYLE_OPTIONS: Array<{
+  value: StickerStyle;
+  id: '3D' | '2D';
+  label: string;
+  img: string;
+}> = [
+  { value: 'Pixar 3D', id: '3D', label: '3D Render', img: TEMPLATE_IMAGES.STICKERS[0] },
+  { value: 'Chibi 2D', id: '2D', label: '2D Anime', img: TEMPLATE_IMAGES.STICKERS[5] },
+];
 
 const isSupportedStickerCount = (count: number) => ALLOWED_STICKER_COUNTS.has(count);
 
@@ -78,63 +114,604 @@ const formatCountdown = (value?: string | null) => {
   const totalMinutes = Math.ceil(diffMs / 60000);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-  if (hours <= 0) return `${minutes} นาที`;
-  return minutes > 0 ? `${hours} ชม. ${minutes} นาที` : `${hours} ชม.`;
+  if (hours <= 0) return `${minutes} min`;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 };
 
-const STYLE_OPTIONS: Array<{
-  value: StickerStyle;
-  label: '2D' | '3D';
-  title: string;
-  hint: string;
-  previewSrc: string;
-}> = [
-    {
-      value: 'Chibi 2D',
-      label: '2D',
-      title: 'Chibi 2D',
-      hint: 'เส้นคม สีสด',
-      previewSrc: '/Chibi2D.png',
-    },
-    {
-      value: 'Pixar 3D',
-      label: '3D',
-      title: 'Pixar 3D',
-      hint: 'นุ่มลึก มีมิติ',
-      previewSrc: '/Pixar3D.png',
-    },
-  ];
+const openDownloadUrl = (url: string) => {
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+const isMobileDevice = () =>
+  typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+const supportsFileShare = () =>
+  typeof navigator !== 'undefined'
+  && typeof navigator.share === 'function'
+  && typeof File !== 'undefined';
+
+const shouldResumeSaveToPhotosInExternalBrowser = () => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get(SAVE_TO_PHOTOS_PARAM) === SAVE_TO_PHOTOS_PARAM_VALUE;
+};
+
+const buildExternalBrowserSaveToPhotosUrl = () => {
+  const url = new URL(window.location.href);
+  url.searchParams.set(SAVE_TO_PHOTOS_PARAM, SAVE_TO_PHOTOS_PARAM_VALUE);
+  return url.toString();
+};
+
+const clearSaveToPhotosIntent = () => {
+  const url = new URL(window.location.href);
+  url.searchParams.delete(SAVE_TO_PHOTOS_PARAM);
+  window.history.replaceState({}, '', url.toString());
+};
+
+const isInLiffClient = () => {
+  try {
+    return typeof liff !== 'undefined' && liff.isInClient();
+  } catch {
+    return false;
+  }
+};
+
+const isAndroidDevice = () => typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+
+const Button = ({ children, variant = 'primary', className = '', ...props }: any) => {
+  const base = 'h-[52px] px-8 rounded-full font-bold flex items-center justify-center gap-2 transition-all active:scale-95 duration-200 disabled:cursor-not-allowed disabled:opacity-50';
+  const variants: Record<string, string> = {
+    primary: 'bg-ai-gradient text-white shadow-[0_4px_12px_rgba(124,58,237,0.3)] hover:opacity-90',
+    secondary: 'bg-surface-container text-on-surface border-2 border-border-light-purple hover:bg-surface-container-high',
+    outline: 'border-2 border-primary text-primary hover:bg-primary/5',
+    ghost: 'text-on-surface-variant hover:bg-surface-container',
+    line: 'bg-[#06C755] text-white hover:opacity-90',
+  };
+
+  return (
+    <button className={`${base} ${variants[variant]} ${className}`} {...props}>
+      {children}
+    </button>
+  );
+};
+
+const Header = ({
+  avatarSrc,
+  attemptLabel,
+  notificationCount,
+}: {
+  avatarSrc?: string;
+  attemptLabel: string;
+  notificationCount?: number;
+}) => (
+  <header className="sticky top-0 z-50 flex items-center justify-between px-6 py-3 bg-surface border-b border-outline-variant/30 backdrop-blur-md">
+    <div className="flex items-center gap-3 min-w-0">
+      <div className="w-10 h-10 rounded-full overflow-hidden shadow-sm shrink-0">
+        <img src={avatarSrc || TEMPLATE_IMAGES.AVATAR} alt="User" className="w-full h-full object-cover" />
+      </div>
+      <h1 className="text-xl font-extrabold text-primary tracking-tight truncate">Mia-U-Sticker</h1>
+    </div>
+    <div className="flex items-center gap-3">
+      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-secondary-container rounded-full shadow-sm">
+        <SparklesIcon className="text-on-secondary-container w-5 h-5" />
+        <span className="text-sm font-bold text-on-secondary-container">{attemptLabel}</span>
+      </div>
+      <button type="button" className="relative p-2 rounded-full hover:bg-surface-container transition-colors" aria-label="Trial notifications">
+        <NotificationIcon className="text-primary w-6 h-6" />
+        {notificationCount ? (
+          <span className="absolute top-1 right-1 min-w-4 h-4 px-1 bg-error text-on-error text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-surface">
+            {notificationCount}
+          </span>
+        ) : null}
+      </button>
+    </div>
+  </header>
+);
+
+const LoadingOverlay = ({ headline, subtext, progress }: { headline: string; subtext: string; progress: number }) => (
+  <div className="pointer-events-none absolute inset-0 flex items-end p-3">
+    <div className="w-full rounded-2xl bg-black/30 p-3 text-white backdrop-blur-[3px]">
+      <div className="flex items-center gap-2">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" />
+        <p className="text-sm font-semibold text-white">{headline}</p>
+      </div>
+      <p className="mt-1 text-xs text-white/90">{subtext}</p>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/30">
+        <span className="block h-full rounded-full bg-secondary-container transition-all duration-500" style={{ width: `${progress}%` }} />
+      </div>
+    </div>
+  </div>
+);
+
+const GeneratorView = ({
+  config,
+  loading,
+  canGenerate,
+  loadingHeadline,
+  loadingSubtext,
+  simulatedProgress,
+  generateLabel,
+  helperText,
+  onUploadClick,
+  onImageUpload,
+  onStyleChange,
+  onPromptChange,
+  onGenerate,
+  fileInputRef,
+}: {
+  config: StickerSheetConfig;
+  loading: boolean;
+  canGenerate: boolean;
+  loadingHeadline: string;
+  loadingSubtext: string;
+  simulatedProgress: number;
+  generateLabel: string;
+  helperText?: string | null;
+  onUploadClick: () => void;
+  onImageUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onStyleChange: (style: StickerStyle) => void;
+  onPromptChange: (prompt: string) => void;
+  onGenerate: () => void;
+  fileInputRef: React.RefObject<HTMLInputElement>;
+}) => (
+  <div className="flex flex-col gap-8 p-6">
+    <section>
+      <h3 className="text-lg font-bold mb-4">Base Image</h3>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={onImageUpload}
+        className="sr-only"
+      />
+      <button
+        type="button"
+        onClick={onUploadClick}
+        className="relative w-full overflow-hidden border-2 border-dashed border-outline-variant rounded-2xl aspect-video flex flex-col items-center justify-center bg-surface-container-low cursor-pointer hover:bg-surface-container transition-colors"
+      >
+        {config.base64Image ? (
+          <img src={config.base64Image} alt="Uploaded source preview" className={`w-full h-full object-cover ${loading ? 'opacity-60' : ''}`} />
+        ) : (
+          <>
+            <div className="p-4 bg-primary-container/10 rounded-full mb-3">
+              <UploadIcon className="text-primary" />
+            </div>
+            <p className="font-bold text-on-surface">Upload Selfie</p>
+            <p className="text-xs text-on-surface-variant">JPEG, PNG up to 5MB</p>
+          </>
+        )}
+        {loading ? <LoadingOverlay headline={loadingHeadline} subtext={loadingSubtext} progress={simulatedProgress} /> : null}
+      </button>
+    </section>
+
+    <section>
+      <h3 className="text-lg font-bold mb-4">Choose Style</h3>
+      <div className="grid grid-cols-2 gap-4">
+        {STYLE_OPTIONS.map((styleOption) => (
+          <button
+            type="button"
+            key={styleOption.id}
+            onClick={() => onStyleChange(styleOption.value)}
+            className={`relative cursor-pointer rounded-2xl overflow-hidden transition-all duration-300 ${config.style === styleOption.value ? 'ring-4 ring-primary ring-offset-2' : ''}`}
+          >
+            <img src={styleOption.img} alt={styleOption.label} className="w-full aspect-square object-cover" />
+            <div className="absolute bottom-0 left-0 right-0 bg-black/40 backdrop-blur-sm p-2">
+              <p className="text-white text-xs font-bold text-center">{styleOption.label}</p>
+            </div>
+          </button>
+        ))}
+      </div>
+    </section>
+
+    <section>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <h3 className="text-lg font-bold">Describe Details</h3>
+      </div>
+      <div className="bg-surface-container rounded-2xl p-4 border-2 border-border-light-purple min-h-[100px]">
+        <textarea
+          value={config.extraPrompt}
+          placeholder="e.g. wearing a spacesuit, floating in a neon galaxy..."
+          className="w-full bg-transparent border-none focus:ring-0 text-sm resize-none outline-none"
+          rows={3}
+          onChange={(e) => onPromptChange(e.target.value)}
+        />
+      </div>
+      <div className="flex flex-wrap gap-2 mt-4">
+        {['Cyberpunk City', 'Fairy Forest', 'Rock Star'].map((tag) => (
+          <button
+            type="button"
+            key={tag}
+            onClick={() => onPromptChange(config.extraPrompt ? `${config.extraPrompt}, ${tag}` : tag)}
+            className="px-4 py-1.5 bg-surface-container-high rounded-full text-xs font-bold text-on-surface-variant cursor-pointer hover:bg-primary-container/10 transition-colors"
+          >
+            ✨ {tag}
+          </button>
+        ))}
+      </div>
+    </section>
+
+    <Button className="w-full text-lg mt-4" onClick={onGenerate} disabled={loading || !canGenerate}>
+      {loading ? <RefreshIcon className="animate-spin" /> : <SparklesIcon />}
+      {generateLabel}
+    </Button>
+    {helperText ? <p className="text-sm text-on-surface-variant text-center">{helperText}</p> : null}
+  </div>
+);
+
+const LimitModal = ({
+  cooldownLabel,
+  onUnlock,
+  onWait,
+  isOpeningPayment,
+}: {
+  cooldownLabel?: string | null;
+  onUnlock: () => void;
+  onWait: () => void;
+  isOpeningPayment: boolean;
+}) => (
+  <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
+    <motion.div
+      initial={{ scale: 0.9, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      exit={{ scale: 0.9, opacity: 0 }}
+      className="bg-white rounded-[32px] p-8 w-full max-w-sm text-center shadow-2xl"
+    >
+      <div className="w-20 h-20 bg-primary-container/10 rounded-full flex items-center justify-center mx-auto mb-6">
+        <RobotIcon className="text-primary text-4xl animate-bounce" />
+      </div>
+      <h3 className="text-2xl font-extrabold mb-2">Limit Reached! (20/20)</h3>
+      <p className="text-on-surface-variant text-sm mb-8">You've used all trial attempts for today. Unlock your final pack or wait for reset.</p>
+
+      <Button className="w-full mb-4" onClick={onUnlock} disabled={isOpeningPayment}>
+        <PayIcon />
+        {isOpeningPayment ? 'Opening Beam...' : 'Unlock & Save Pack (199 THB)'}
+      </Button>
+      <button type="button" className="text-primary font-bold hover:underline" onClick={onWait}>Wait for Reset</button>
+
+      <div className="mt-8 flex flex-col items-center gap-2">
+        <p className="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Reset In</p>
+        <div className="px-6 py-2 bg-surface-container rounded-full border border-border-light-purple">
+          <span className="font-bold text-primary tabular-nums">{cooldownLabel ?? '24:00:00'}</span>
+        </div>
+      </div>
+    </motion.div>
+  </div>
+);
+
+const GridView = ({
+  stickerSlots,
+  selectedCount,
+  finalPackPaid,
+  loading,
+  helperText,
+  error,
+  onToggle,
+  onRegenerate,
+  onContinue,
+  onSelectAll,
+  onClearAll,
+}: {
+  stickerSlots: StickerSlot[];
+  selectedCount: number;
+  finalPackPaid: boolean;
+  loading: boolean;
+  helperText?: string | null;
+  error?: string | null;
+  onToggle: (index: number) => void;
+  onRegenerate: () => void;
+  onContinue: () => void;
+  onSelectAll: () => void;
+  onClearAll: () => void;
+}) => (
+  <div className="p-6">
+    <div className="text-center mb-8">
+      <h2 className="text-2xl font-extrabold mb-1">The Magic Grid</h2>
+      <p className="text-on-surface-variant text-sm">Tap the stickers you want to keep. They are so bouncy!</p>
+    </div>
+
+    <div className="mb-4 flex justify-center gap-2">
+      <button type="button" onClick={onSelectAll} className="px-4 py-1.5 bg-surface-container-high rounded-full text-xs font-bold text-on-surface-variant hover:bg-primary-container/10">
+        Keep All
+      </button>
+      <button type="button" onClick={onClearAll} className="px-4 py-1.5 bg-surface-container-high rounded-full text-xs font-bold text-on-surface-variant hover:bg-primary-container/10">
+        Generate All Again
+      </button>
+    </div>
+
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {stickerSlots.map((slot, index) => {
+        const isSelected = slot.locked;
+        return (
+          <motion.button
+            type="button"
+            key={slot.id}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => onToggle(index)}
+            disabled={loading || finalPackPaid}
+            className={`relative aspect-square rounded-[24px] overflow-hidden transition-all duration-300 cursor-pointer disabled:cursor-not-allowed ${isSelected ? 'border-ai-gradient shadow-lg scale-100' : 'border-2 border-border-light-purple opacity-60 grayscale-[40%] scale-[0.98]'}`}
+          >
+            <img src={slot.url} alt={`Sticker ${index + 1}`} className={`w-full h-full object-contain bg-white ${!isSelected && 'blur-[1px]'}`} />
+            <div className={`absolute top-2 right-2 w-8 h-8 rounded-full shadow-md flex items-center justify-center transition-all ${isSelected ? 'bg-white' : 'bg-white/40'}`}>
+              {isSelected ? <CheckIcon className="text-secondary-container w-6 h-6" /> : <LockIcon className="text-on-surface-variant w-4 h-4" />}
+            </div>
+          </motion.button>
+        );
+      })}
+    </div>
+
+    {helperText ? <p className="mt-5 text-sm text-center text-on-surface-variant">{helperText}</p> : null}
+    {error ? <p className="mt-3 rounded-2xl bg-error-container px-4 py-3 text-sm font-bold text-on-error-container">{error}</p> : null}
+
+    <div className="mt-12 flex flex-col gap-4 sticky bottom-6">
+      <Button variant="secondary" className="w-full" onClick={onRegenerate} disabled={loading || finalPackPaid}>
+        {loading ? <RefreshIcon className="animate-spin" /> : <RefreshIcon />}
+        Regenerate Unselected
+      </Button>
+      <Button variant="primary" className="w-full" onClick={onContinue} disabled={loading}>
+        <CheckIcon />
+        {finalPackPaid ? 'Save to Photos' : `Keep & Continue (${selectedCount})`}
+      </Button>
+    </div>
+  </div>
+);
+
+const CheckoutView = ({
+  productId,
+  finalPackPaid,
+  extraCount,
+  selectedExtraCount,
+  onBack,
+  onClose,
+  onPay,
+  onSave,
+  isBusy,
+}: {
+  productId: PaymentProductId;
+  finalPackPaid: boolean;
+  extraCount: number;
+  selectedExtraCount: number;
+  onBack: () => void;
+  onClose: () => void;
+  onPay: () => void;
+  onSave: () => void;
+  isBusy: boolean;
+}) => {
+  const isExtra = productId === 'extra_pack_99';
+  const title = isExtra ? 'Extra Vault' : 'Final Pack';
+  const price = isExtra ? '99 THB' : '199 THB';
+  const buttonLabel = isExtra
+    ? isBusy ? 'Opening Beam...' : 'Pay 99 THB'
+    : finalPackPaid
+      ? isBusy ? 'Preparing...' : 'Save to Photos'
+      : isBusy ? 'Opening Beam...' : 'Pay & Save Now';
+  const features = isExtra
+    ? [
+        { icon: <HeartIcon />, text: `Unlock selected extras (${selectedExtraCount || extraCount})` },
+        { icon: <HighQualityIcon />, text: 'Export selected hidden gems' },
+        { icon: <UnlockIcon />, text: 'Extra pack is separate from final 16' },
+      ]
+    : [
+        { icon: <HeartIcon />, text: 'Save all 16 unique stickers' },
+        { icon: <HighQualityIcon />, text: 'High-resolution export' },
+        { icon: <UnlockIcon />, text: 'Reset attempts after successful save' },
+      ];
+
+  return (
+    <div className="flex flex-col gap-8 p-6 max-w-md mx-auto">
+      <div className="flex items-center justify-between">
+        <Button variant="ghost" className="p-0 h-10 w-10" onClick={onBack}><BackIcon /></Button>
+        <h2 className="text-xl font-extrabold text-primary">Unlock Pack</h2>
+        <Button variant="ghost" className="p-0 h-10 w-10" onClick={onClose}><CloseIcon /></Button>
+      </div>
+
+      <div className="flex flex-col items-center text-center">
+        <div className="w-48 h-48 rounded-[40px] bg-white border-4 border-border-light-purple shadow-xl mb-6 relative overflow-hidden flex items-center justify-center p-4">
+          <img src={TEMPLATE_IMAGES.STICKER_PACK} alt="Pack" className="w-full h-full object-contain" />
+          <div className="absolute -top-2 -right-2 bg-secondary-container p-2 rounded-full shadow-lg rotate-12">
+            <StarIcon className="text-on-secondary-container" />
+          </div>
+        </div>
+        <h3 className="text-2xl font-extrabold mb-2">{title}</h3>
+        <div className="px-8 py-2 bg-surface-container rounded-full border-2 border-border-light-purple">
+          <span className="text-3xl font-black text-ai-gradient italic">{price}</span>
+        </div>
+      </div>
+
+      <div className="bg-surface-container rounded-[32px] p-6 border-2 border-border-light-purple space-y-4">
+        {features.map((feature, index) => (
+          <div key={index} className="flex items-center gap-4">
+            <div className="w-10 h-10 rounded-full bg-primary-fixed flex items-center justify-center text-primary">
+              {feature.icon}
+            </div>
+            <p className="font-bold text-on-surface">{feature.text}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-auto">
+        <Button className="w-full py-6 text-xl" onClick={isExtra || !finalPackPaid ? onPay : onSave} disabled={isBusy}>
+          {isBusy ? <RefreshIcon className="animate-spin" /> : isExtra || !finalPackPaid ? <PayIcon /> : <DownloadIcon />}
+          {buttonLabel}
+        </Button>
+        <p className="text-center text-xs text-on-surface-variant mt-4 opacity-70">Secure payment powered by Beam.</p>
+      </div>
+    </div>
+  );
+};
+
+const SuccessView = ({
+  stickerSlots,
+  extraSlots,
+  selectedExtraIds,
+  extraPackPaid,
+  isBusy,
+  onToggleExtra,
+  onSelectFirst16,
+  onClearExtras,
+  onPayExtra,
+  onDownloadExtras,
+  onDownloadFinal,
+  onOpenStickerMaker,
+}: {
+  stickerSlots: StickerSlot[];
+  extraSlots: ExtraSlot[];
+  selectedExtraIds: string[];
+  extraPackPaid: boolean;
+  isBusy: boolean;
+  onToggleExtra: (id: string) => void;
+  onSelectFirst16: () => void;
+  onClearExtras: () => void;
+  onPayExtra: () => void;
+  onDownloadExtras: () => void;
+  onDownloadFinal: () => void;
+  onOpenStickerMaker: () => void;
+}) => {
+  const [showVault, setShowVault] = useState(false);
+  const selectedCount = selectedExtraIds.length;
+
+  return (
+    <div className="flex flex-col gap-10 p-6 min-h-screen">
+      <section className="text-center mt-8">
+        <div className="w-32 h-32 bg-success-teal/10 rounded-full flex items-center justify-center mx-auto relative mb-8 shadow-inner">
+          <CheckIcon className="text-success-teal text-6xl" />
+          <div className="absolute -bottom-4 w-24 h-24 rounded-full overflow-hidden border-4 border-background shadow-lg scale-110">
+            <img src={TEMPLATE_IMAGES.CELEBRATION} alt="Celebration" className="w-full h-full object-cover" />
+          </div>
+        </div>
+        <h2 className="text-3xl font-extrabold text-primary mb-2">Payment Success!</h2>
+        <p className="text-on-surface-variant">Your stickers are ready for the world.</p>
+      </section>
+
+      <div className="bg-white rounded-[32px] p-6 border-2 border-border-light-purple shadow-sm space-y-6">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <SparklesIcon className="text-primary" />
+            <h3 className="font-bold text-lg">Main Collection</h3>
+          </div>
+          <span className="px-3 py-1 bg-primary-container text-white text-xs font-bold rounded-full">{stickerSlots.length || 16} Stickers</span>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          {(stickerSlots.length ? stickerSlots : TEMPLATE_IMAGES.STICKERS.map((url, index) => ({ id: String(index), url, locked: true }))).slice(0, 3).map((slot) => (
+            <img key={slot.id} src={slot.url} className="aspect-square object-contain rounded-xl bg-surface-container" alt="Saved sticker" />
+          ))}
+          <div className="aspect-square bg-surface-container flex items-center justify-center rounded-xl font-bold text-primary">+13</div>
+        </div>
+        <div className="flex flex-col gap-3">
+          <Button variant="secondary" className="w-full h-12" onClick={onDownloadFinal}><DownloadIcon /> Download ZIP</Button>
+          <Button variant="line" className="w-full h-12 text-sm" onClick={onOpenStickerMaker}><LineIcon /> Open LINE Sticker Maker</Button>
+        </div>
+      </div>
+
+      {extraSlots.length ? (
+        <section className="pb-32">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <StarIcon className="text-secondary-container" />
+              <h3 className="font-bold text-lg">The Extra Vault</h3>
+            </div>
+            <span className="text-xs font-bold text-on-surface-variant">{selectedCount}/16 selected</span>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            {extraSlots.map((slot, index) => {
+              const selected = selectedExtraIds.includes(slot.id);
+              return (
+                <button
+                  type="button"
+                  key={slot.id}
+                  onClick={() => onToggleExtra(slot.id)}
+                  disabled={extraPackPaid || isBusy}
+                  className={`relative aspect-square rounded-3xl overflow-hidden cursor-pointer group ${selected ? 'ring-4 ring-secondary-container ring-offset-2' : ''}`}
+                >
+                  {slot.url ? (
+                    <img src={slot.url} alt={`Extra sticker ${index + 1}`} className="w-full h-full object-contain bg-white transition-transform group-hover:scale-105" />
+                  ) : (
+                    <div className="w-full h-full bg-surface-container flex items-center justify-center text-sm font-bold text-on-surface-variant">Extra</div>
+                  )}
+                  <div className={`absolute inset-0 ${selected ? 'bg-primary/10' : 'bg-black/20 backdrop-blur-[2px]'} flex items-center justify-center`}>
+                    {selected ? <CheckIcon className="text-secondary-container" /> : <LockIcon className="text-white" />}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" onClick={onSelectFirst16} disabled={extraPackPaid} className="px-4 py-1.5 bg-surface-container-high rounded-full text-xs font-bold text-on-surface-variant">
+              Select first 16
+            </button>
+            <button type="button" onClick={onClearExtras} disabled={extraPackPaid} className="px-4 py-1.5 bg-surface-container-high rounded-full text-xs font-bold text-on-surface-variant">
+              Clear
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {extraSlots.length ? (
+        <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-md border-t border-border-light-purple z-40">
+          <div className="max-w-md mx-auto flex items-center gap-4">
+            <div className="flex-1">
+              <p className="text-xs text-on-surface-variant font-bold">
+                {extraPackPaid ? 'Extra Vault unlocked' : `Unlock selected (${selectedCount})`}
+              </p>
+              <p className="text-xl font-black text-primary italic">99 THB</p>
+            </div>
+            <Button
+              onClick={extraPackPaid ? onDownloadExtras : () => setShowVault(true)}
+              disabled={isBusy || selectedCount === 0}
+              className="px-10"
+            >
+              {isBusy ? <RefreshIcon className="animate-spin" /> : <PaymentsIcon />}
+              {extraPackPaid ? 'Download' : 'Payment 99 THB'}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <AnimatePresence>
+        {showVault && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
+            <motion.div
+              initial={{ y: 50, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 50, opacity: 0 }}
+              className="bg-white rounded-[32px] p-8 w-full max-w-sm text-center shadow-2xl relative"
+            >
+              <div className="w-24 h-24 mx-auto mb-6 relative">
+                <img src={extraSlots.find((slot) => selectedExtraIds.includes(slot.id))?.url || TEMPLATE_IMAGES.STICKERS[2]} className="w-full h-full object-contain rounded-full border-4 border-secondary-container bg-white" alt="Selected extra preview" />
+                <div className="absolute -top-1 -right-1 bg-secondary-container p-1 rounded-full"><StarIcon className="text-xs" /></div>
+              </div>
+              <h3 className="text-2xl font-extrabold mb-1">Unlock Extra Vault</h3>
+              <div className="text-2xl font-black text-primary mb-4 italic">99 THB</div>
+              <p className="text-sm text-on-surface-variant mb-8">Secure all your hidden gems and save them to your gallery forever.</p>
+
+              <div className="space-y-3 mb-8">
+                <div className="flex items-center justify-between p-4 rounded-2xl border-2 border-primary bg-primary/5">
+                  <div className="flex items-center gap-3 font-bold"><PayIcon className="text-primary" /> Beam Payment</div>
+                  <div className="w-5 h-5 rounded-full border-4 border-primary bg-white" />
+                </div>
+              </div>
+
+              <Button className="w-full mb-4" onClick={onPayExtra} disabled={isBusy || selectedCount === 0}>
+                {isBusy ? <RefreshIcon className="animate-spin" /> : <PayIcon />}
+                Pay 99 THB
+              </Button>
+              <button type="button" className="text-on-surface-variant font-bold text-sm" onClick={() => setShowVault(false)}>Cancel</button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
 
 const GeneratePage: React.FC = () => {
-  const [loading, setLoading] = useState(false);
-  const [processingStep, setProcessingStep] = useState<ProcessingStep>('idle');
-  const [error, setError] = useState<string | null>(null);
-  const [transparentImageUrl, setTransparentImageUrl] = useState<string | null>(null);
-  const [stickerSlots, setStickerSlots] = useState<StickerSlot[]>([]);
-  const [hasGenerated, setHasGenerated] = useState(false);
   const isOnline = useOnlineStatus();
   const { profile } = useAuth();
-  const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
-  const [generationTargetCount, setGenerationTargetCount] = useState(DEFAULT_STICKER_COUNT);
-  const [isComplianceChecking, setIsComplianceChecking] = useState(false);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [isSharingToPhotos, setIsSharingToPhotos] = useState(false);
-  const [isCreatingPayment, setIsCreatingPayment] = useState<PaymentProductId | null>(null);
-  const [generationState, setGenerationState] = useState<GenerationState | null>(null);
-  const [extraPickSlots, setExtraPickSlots] = useState<ExtraPickSlot[]>([]);
-  const [selectedExtraIds, setSelectedExtraIds] = useState<string[]>([]);
-  const [isExtraVaultLoading, setIsExtraVaultLoading] = useState(false);
-  const [isExtraExporting, setIsExtraExporting] = useState(false);
-  const [clockTick, setClockTick] = useState(0);
-  const [isPromptGuideOpen, setIsPromptGuideOpen] = useState(false);
-  const [hasSeenPromptGuide, setHasSeenPromptGuide] = useState(() => {
-    try {
-      return window.localStorage.getItem(PROMPT_GUIDE_SEEN_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [config, setConfig] = useState<StickerSheetConfig>({
     base64Image: '',
@@ -143,94 +720,62 @@ const GeneratePage: React.FC = () => {
     extraPrompt: '',
     style: 'Pixar 3D',
   });
+  const [loading, setLoading] = useState(false);
+  const [processingStep, setProcessingStep] = useState<ProcessingStep>('idle');
+  const [simulatedStickerCount, setSimulatedStickerCount] = useState(1);
+  const [generationTargetCount, setGenerationTargetCount] = useState(DEFAULT_STICKER_COUNT);
+  const [error, setError] = useState<string | null>(null);
+  const [stickerSlots, setStickerSlots] = useState<StickerSlot[]>([]);
+  const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>([]);
+  const [selectedExtraIds, setSelectedExtraIds] = useState<string[]>([]);
+  const [generationState, setGenerationState] = useState<GenerationState | null>(null);
+  const [checkoutProduct, setCheckoutProduct] = useState<CheckoutProduct>(null);
+  const [isCreatingPayment, setIsCreatingPayment] = useState<PaymentProductId | null>(null);
+  const [isSavingFinal, setIsSavingFinal] = useState(false);
+  const [isExtraExporting, setIsExtraExporting] = useState(false);
+  const [dismissedLimit, setDismissedLimit] = useState(false);
+  const [clockTick, setClockTick] = useState(0);
 
-  // Backend-driven: no local AI/image-processing refs needed
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const resultRef = useRef<HTMLElement>(null);
   const hydrateCurrentGeneration = (data: CurrentGenerationPayload) => {
     const now = Date.now();
     const resultSlots = data.result_slots ?? [];
-    const stickerCount = resultSlots.length;
     const extraVault = data.extra_vault ?? [];
 
     if (data.generation_state) {
       setGenerationState(data.generation_state);
     }
 
-    if (data.status === 'ok' && isSupportedStickerCount(stickerCount)) {
+    if (data.status === 'ok' && isSupportedStickerCount(resultSlots.length)) {
       const slots = resultSlots.map((slot, index) => ({
         id: `${data.job_id ?? now}-${index}`,
         url: slot.url,
         locked: slot.locked,
       }));
       setStickerSlots(slots);
-      setTransparentImageUrl(slots[0]?.url ?? null);
-      setHasGenerated(true);
-      setJobId(data.job_id ?? null);
-      setGenerationTargetCount(stickerCount);
+      setGenerationTargetCount(slots.length);
     } else if (data.status === 'empty') {
       setStickerSlots([]);
-      setTransparentImageUrl(null);
-      setHasGenerated(false);
-      setJobId(data.job_id ?? null);
       setGenerationTargetCount(DEFAULT_STICKER_COUNT);
     }
 
-    setExtraPickSlots(
-      extraVault.map((item, index) => ({
-        id: item.id || `${data.job_id ?? now}-extra-${index}`,
-        replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
-        url: item.url ?? null,
-        createdAt: item.created_at ?? null,
-      })),
-    );
-    setSelectedExtraIds((prev) => prev.filter((id) => extraVault.some((item) => item.id === id)));
+    const mappedExtras = extraVault.map((item, index) => ({
+      id: item.id || `${data.job_id ?? now}-extra-${index}`,
+      replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
+      url: item.url ?? null,
+      createdAt: item.created_at ?? null,
+    }));
+    setExtraSlots(mappedExtras);
+    setSelectedExtraIds((previous) => {
+      const valid = previous.filter((id) => mappedExtras.some((slot) => slot.id === id));
+      return valid.length ? valid : mappedExtras.slice(0, 16).map((slot) => slot.id);
+    });
   };
 
   useEffect(() => {
-    if (!loading) {
-      setSimulatedStickerCount(1);
-      setIsComplianceChecking(false);
-      return;
-    }
-
-    if (processingStep === 'analyzing') {
-      setSimulatedStickerCount(1);
-      setIsComplianceChecking(false);
-      return;
-    }
-
-    if (processingStep === 'removing') {
-      setSimulatedStickerCount(generationTargetCount);
-      setIsComplianceChecking(true);
-      return;
-    }
-
-    if (processingStep !== 'generating') return;
-
-    const startedAt = Date.now();
-    const interval = window.setInterval(() => {
-      const elapsedSeconds = (Date.now() - startedAt) / 1000;
-      const nextCount = Math.min(generationTargetCount, Math.max(1, Math.floor(elapsedSeconds * 1.35) + 1));
-      setSimulatedStickerCount(nextCount);
-      setIsComplianceChecking(Math.floor(elapsedSeconds / 2.2) % 2 === 1);
-    }, 650);
-
-    return () => window.clearInterval(interval);
-  }, [loading, processingStep, generationTargetCount]);
-
-  useEffect(() => {
-    const loadCurrentSet = async () => {
-      if (!profile?.userId) return;
-      try {
-        const data = await getCurrentStickers(profile.userId);
-        hydrateCurrentGeneration(data);
-      } catch {
-        // Non-blocking: ignore load failures for current set
-      }
-    };
-
-    loadCurrentSet();
+    if (!profile?.userId) return;
+    getCurrentStickers(profile.userId)
+      .then(hydrateCurrentGeneration)
+      .catch(() => null);
   }, [profile?.userId]);
 
   useEffect(() => {
@@ -238,10 +783,99 @@ const GeneratePage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, []);
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  useEffect(() => {
+    if (!loading) {
+      setSimulatedStickerCount(1);
+      return;
+    }
+    if (processingStep === 'analyzing') {
+      setSimulatedStickerCount(1);
+      return;
+    }
+    if (processingStep === 'removing') {
+      setSimulatedStickerCount(generationTargetCount);
+      return;
+    }
+    if (processingStep !== 'generating') return;
 
+    const startedAt = Date.now();
+    const interval = window.setInterval(() => {
+      const elapsedSeconds = (Date.now() - startedAt) / 1000;
+      const nextCount = Math.min(generationTargetCount, Math.max(1, Math.floor(elapsedSeconds * 1.35) + 1));
+      setSimulatedStickerCount(nextCount);
+    }, 650);
+    return () => window.clearInterval(interval);
+  }, [generationTargetCount, loading, processingStep]);
+
+  useEffect(() => {
+    if (!shouldResumeSaveToPhotosInExternalBrowser() || isInLiffClient()) return;
+    clearSaveToPhotosIntent();
+  }, []);
+
+  const attemptCount = generationState?.generation_count ?? 0;
+  const attemptLimit = generationState?.generation_limit ?? 20;
+  const remainingAttempts = generationState?.remaining_attempts ?? attemptLimit;
+  const finalPackPaid = Boolean(generationState?.final_pack_paid);
+  const finalPackExported = Boolean(generationState?.final_pack_exported);
+  const extraPackPaid = Boolean(generationState?.extra_pack_paid);
+  const isGenerationLocked = Boolean(generationState?.is_generation_locked);
+  const cooldownLabel = useMemo(
+    () => formatCountdown(generationState?.generation_cooldown_until),
+    [clockTick, generationState?.generation_cooldown_until],
+  );
+  const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
+  const unlockedCount = stickerSlots.length ? stickerSlots.length - lockedCount : DEFAULT_STICKER_COUNT;
+  const canGenerate = Boolean(config.base64Image) && !isGenerationLocked && !(finalPackPaid && !finalPackExported);
+  const attemptLabel = `${attemptCount}/${attemptLimit}`;
+  const notificationCount = generationState?.warning?.remaining != null ? Math.max(0, generationState.warning.remaining) : undefined;
+
+  const loadingHeadline =
+    processingStep === 'analyzing'
+      ? 'Analyzing selfie'
+      : processingStep === 'generating'
+        ? `Generating ${simulatedStickerCount}/${generationTargetCount}`
+        : processingStep === 'removing'
+          ? 'Preparing transparent PNG'
+          : 'Ready';
+
+  const loadingSubtext =
+    processingStep === 'analyzing'
+      ? 'Checking face detail and prompt safety'
+      : processingStep === 'generating'
+        ? 'Rendering your sticker set'
+        : processingStep === 'removing'
+          ? 'Cleaning background for LINE-ready assets'
+          : 'Ready';
+
+  const simulatedProgress =
+    processingStep === 'analyzing'
+      ? 12
+      : processingStep === 'generating'
+        ? 16 + Math.round((simulatedStickerCount / generationTargetCount) * 64)
+        : processingStep === 'removing'
+          ? 92
+          : processingStep === 'complete'
+            ? 100
+            : 0;
+
+  const helperText = generationState?.warning?.message
+    || (isGenerationLocked ? `Reset in ${cooldownLabel ?? '24h'} or unlock the final pack.` : null);
+
+  const currentView: 'generator' | 'grid' | 'checkout' | 'success' = checkoutProduct
+    ? 'checkout'
+    : finalPackExported
+      ? 'success'
+      : stickerSlots.length
+        ? (finalPackPaid ? 'checkout' : 'grid')
+        : 'generator';
+
+  const activeCheckoutProduct = checkoutProduct ?? (finalPackPaid && !finalPackExported ? 'final_pack_199' : null);
+
+  const openImagePicker = () => fileInputRef.current?.click();
+
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
     if (!file.type.startsWith('image/')) {
       setError('Please upload an image file only.');
       return;
@@ -249,28 +883,19 @@ const GeneratePage: React.FC = () => {
 
     const reader = new FileReader();
     reader.onloadend = () => {
-      if (typeof reader.result === 'string') {
-        setConfig((prev) => ({ ...prev, base64Image: reader.result }));
-        setHasGenerated(false);
-        setTransparentImageUrl(null);
-        setStickerSlots([]);
-        setExtraPickSlots([]);
-        setSelectedExtraIds([]);
-        setGenerationState(null);
-        setJobId(null);
-        setGenerationTargetCount(DEFAULT_STICKER_COUNT);
-        setError(null);
-        if (profile?.userId) {
-          resetCurrentStickers(profile.userId).catch(() => null);
-        }
+      if (typeof reader.result !== 'string') return;
+      setConfig((previous) => ({ ...previous, base64Image: reader.result }));
+      setStickerSlots([]);
+      setExtraSlots([]);
+      setSelectedExtraIds([]);
+      setGenerationState(null);
+      setCheckoutProduct(null);
+      setError(null);
+      if (profile?.userId) {
+        resetCurrentStickers(profile.userId).catch(() => null);
       }
     };
-
     reader.readAsDataURL(file);
-  };
-
-  const openImagePicker = () => {
-    fileInputRef.current?.click();
   };
 
   const generateSheet = async () => {
@@ -278,42 +903,34 @@ const GeneratePage: React.FC = () => {
       setError('You are offline. Please connect to the internet and try again.');
       return;
     }
-
     if (!profile?.userId) {
       setError('Please log in with LINE before generating stickers.');
       return;
     }
-
     if (!config.base64Image) {
       setError('Please upload a source image first.');
       return;
     }
 
     const canReuseExisting = isSupportedStickerCount(stickerSlots.length);
-    const unlockedCount = canReuseExisting
-      ? stickerSlots.filter((slot) => !slot.locked).length
-      : DEFAULT_STICKER_COUNT;
-
-    if (canReuseExisting && unlockedCount === 0) {
-      setError('เลือกอย่างน้อย 1 สติ๊กเกอร์ที่ยังไม่ล็อกก่อนกด Regenerate');
+    const unlockedSlots = canReuseExisting ? stickerSlots.filter((slot) => !slot.locked).length : DEFAULT_STICKER_COUNT;
+    if (canReuseExisting && unlockedSlots === 0) {
+      setError('Select at least one sticker to regenerate.');
       return;
     }
 
-    let finalStickerCount = canReuseExisting ? stickerSlots.length : DEFAULT_STICKER_COUNT;
-    setGenerationTargetCount(unlockedCount);
+    setGenerationTargetCount(unlockedSlots);
     setLoading(true);
     setProcessingStep('analyzing');
     setError(null);
-    setJobId(null);
+    setDismissedLimit(false);
 
     const pollUntilComplete = async (jobId: string) => {
       const maxAttempts = 180;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const statusResp = await checkJobStatus(jobId);
         if (statusResp.status === 'completed' && statusResp.result_slots) {
-          if (statusResp.generation_state) {
-            setGenerationState(statusResp.generation_state);
-          }
+          if (statusResp.generation_state) setGenerationState(statusResp.generation_state);
           return statusResp;
         }
         if (statusResp.status === 'failed') {
@@ -321,100 +938,53 @@ const GeneratePage: React.FC = () => {
         }
         await new Promise((resolve) => window.setTimeout(resolve, 2000));
       }
-      throw new Error('กำลังสร้างภาพใช้เวลานานกว่าปกติ โปรดลองอีกครั้งในภายหลัง');
+      throw new Error('Generation is taking longer than expected. Please try again later.');
     };
 
     try {
-      // Step 1: Upload Image to Backend -> GCS
       const uploadResp = await uploadImage(config.base64Image, `selfie_${Date.now()}.jpg`);
-      const gcsUri = uploadResp.gcs_uri;
-
-      // Step 2: Start Generation Job on backend
-      setProcessingStep('generating');
       const lockedIndices = stickerSlots
         .map((slot, index) => (slot.locked ? index : null))
         .filter((index): index is number => index !== null);
 
-      const jobResp = await startGeneration(profile.userId, gcsUri, config.style, config.extraPrompt, lockedIndices);
-      if (jobResp.generation_state) {
-        setGenerationState(jobResp.generation_state);
-      }
+      setProcessingStep('generating');
+      const jobResp = await startGeneration(profile.userId, uploadResp.gcs_uri, config.style, config.extraPrompt, lockedIndices);
+      if (jobResp.generation_state) setGenerationState(jobResp.generation_state);
 
-      // The current backend returns result_urls directly (synchronous flow)
-      let resolved = jobResp;
-      if (jobResp.status !== 'completed' && jobResp.job_id) {
-        resolved = await pollUntilComplete(jobResp.job_id);
-      }
-      const resultCount = resolved.result_slots?.length ?? 0;
-      if (resolved.status === 'completed' && resolved.result_slots && isSupportedStickerCount(resultCount)) {
-        const now = Date.now();
-        const slots = resolved.result_slots.map((slot, index) => ({
-          id: `${resolved.job_id ?? now}-${index}`,
-          url: slot.url,
-          locked: slot.locked,
-        }));
-
-        setProcessingStep('complete');
-
-        try {
-          const currentData = await getCurrentStickers(profile.userId);
-          hydrateCurrentGeneration(currentData);
-          finalStickerCount = currentData.result_slots?.length ?? resultCount;
-        } catch {
-          // Fallback to the completed job payload when the follow-up sync fails.
-          setStickerSlots(slots);
-          setJobId(resolved.job_id || null);
-          setTransparentImageUrl(slots[0]?.url ?? null);
-          setHasGenerated(true);
-          setExtraPickSlots([]);
-          setSelectedExtraIds([]);
-          finalStickerCount = resultCount;
-          setGenerationTargetCount(resultCount);
-        }
-
-        setTimeout(() => {
-          const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-          resultRef.current?.scrollIntoView({
-            behavior: prefersReducedMotion ? 'auto' : 'smooth',
-            block: 'start',
-          });
-        }, 250);
-      } else {
+      const resolved = jobResp.status !== 'completed' && jobResp.job_id ? await pollUntilComplete(jobResp.job_id) : jobResp;
+      if (resolved.status !== 'completed' || !resolved.result_slots || !isSupportedStickerCount(resolved.result_slots.length)) {
         throw new Error('Generation failed or returned unexpected status.');
       }
+
+      setProcessingStep('removing');
+      const currentData = await getCurrentStickers(profile.userId);
+      hydrateCurrentGeneration(currentData);
+      setProcessingStep('complete');
     } catch (err: any) {
-      console.error('Generation Error:', err);
       const backendDetail = err?.response?.data?.detail;
       if (backendDetail?.generation_state) {
         setGenerationState(backendDetail.generation_state);
       }
+      if (backendDetail?.generation_state?.is_generation_locked) {
+        setDismissedLimit(false);
+      }
       const message = backendDetail?.generation_state?.warning?.message
         || (backendDetail?.error_code === 'generation_limit_reached'
-          ? 'ครบโควต้าทดลองแล้ว ปลดล็อก 199 บาทเพื่อบันทึกสติกเกอร์ชุดนี้'
+          ? 'Limit reached. Unlock 199 THB to save this sticker pack.'
           : typeof backendDetail === 'string'
             ? backendDetail
-            : (backendDetail ? JSON.stringify(backendDetail) : (err.response?.data ? JSON.stringify(err.response.data) : err.message || 'Error connecting to server')));
+            : err?.message || 'Error connecting to server.');
       setError(message);
     } finally {
       setLoading(false);
       setProcessingStep('idle');
-      setGenerationTargetCount(finalStickerCount);
     }
   };
 
   const toggleStickerLock = (index: number) => {
-    setStickerSlots((prev) =>
-      prev.map((slot, slotIndex) =>
-        slotIndex === index
-          ? { ...slot, locked: !slot.locked }
-          : slot
-      )
+    setStickerSlots((previous) =>
+      previous.map((slot, slotIndex) => (slotIndex === index ? { ...slot, locked: !slot.locked } : slot)),
     );
-    setError(null);
-  };
-
-  const setAllStickerLocks = (locked: boolean) => {
-    setStickerSlots((prev) => prev.map((slot) => ({ ...slot, locked })));
     setError(null);
   };
 
@@ -423,7 +993,6 @@ const GeneratePage: React.FC = () => {
       setError('Please log in with LINE before payment.');
       return;
     }
-
     try {
       setIsCreatingPayment(productId);
       setError(null);
@@ -440,1210 +1009,263 @@ const GeneratePage: React.FC = () => {
       );
       window.location.assign(result.checkout_url);
     } catch (err: any) {
-      const message = err?.response?.data?.detail || err?.message || 'ไม่สามารถสร้างลิงก์ชำระเงินได้';
-      setError(message);
+      setError(err?.response?.data?.detail || err?.message || 'Could not create Beam payment link.');
     } finally {
       setIsCreatingPayment(null);
     }
   };
 
-  const refreshExtraVault = async () => {
+  const finalizeFinalPackExport = async () => {
     if (!profile?.userId) return;
+    const result = await finalizeCurrentStickerExport(profile.userId);
+    setGenerationState(result.generation_state);
+    const mappedExtras = (result.extra_vault ?? []).map((item) => ({
+      id: item.id,
+      replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
+      url: item.url,
+      createdAt: item.created_at ?? null,
+    }));
+    setExtraSlots(mappedExtras);
+    setSelectedExtraIds(mappedExtras.slice(0, 16).map((slot) => slot.id));
+    setCheckoutProduct(null);
+  };
+
+  const handleSaveFinalPack = async () => {
+    if (!profile?.userId) return;
+    if (!finalPackPaid) {
+      setCheckoutProduct('final_pack_199');
+      return;
+    }
+
+    if (isAndroidDevice() && isInLiffClient()) {
+      window.location.assign(buildExternalBrowserSaveToPhotosUrl());
+      return;
+    }
+
     try {
-      setIsExtraVaultLoading(true);
-      const data = await getCurrentExtraVault(profile.userId);
-      setGenerationState(data.generation_state);
-      setExtraPickSlots(
-        (data.extra_vault ?? []).map((item) => ({
-          id: item.id,
-          replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
-          url: item.url,
-          createdAt: item.created_at ?? null,
-        })),
-      );
-      setSelectedExtraIds((prev) => prev.filter((id) => data.extra_vault.some((item) => item.id === id)));
+      setIsSavingFinal(true);
+      setError(null);
+      if (isMobileDevice() && supportsFileShare()) {
+        const batchId = buildSaveToPhotosBatchId();
+        const files = await Promise.all(
+          Array.from({ length: stickerSlots.length || DEFAULT_STICKER_COUNT }, async (_, index) => {
+            const blob = await downloadCurrentStickerForShare(profile.userId, index);
+            return new File([blob], buildStickerPngFileName(index, batchId), { type: 'image/png' });
+          }),
+        );
+        const canShare = typeof navigator.canShare === 'function' ? navigator.canShare({ files }) : true;
+        if (canShare) {
+          await navigator.share({ files, title: 'Mia-U-Sticker Final Pack' });
+          await finalizeFinalPackExport();
+          return;
+        }
+      }
+
+      const { url } = await getCurrentStickersDownloadUrl(profile.userId);
+      openDownloadUrl(url);
+      await finalizeFinalPackExport();
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to load Extra Vault.');
+      const detail = err?.response?.data?.detail;
+      if (detail?.generation_state) setGenerationState(detail.generation_state);
+      if (detail?.error_code === 'payment_required') {
+        setCheckoutProduct('final_pack_199');
+        setError('Please unlock Final Pack 199 THB before saving.');
+      } else {
+        setError(typeof detail === 'string' ? detail : err?.message || 'Save to Photos failed.');
+      }
     } finally {
-      setIsExtraVaultLoading(false);
+      setIsSavingFinal(false);
     }
   };
 
+  const handleDownloadFinalAgain = async () => {
+    if (!profile?.userId) return;
+    try {
+      const { url } = await getCurrentStickersDownloadUrl(profile.userId);
+      openDownloadUrl(url);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || err?.message || 'Could not download final pack.');
+    }
+  };
+
+  const refreshExtraVault = async () => {
+    if (!profile?.userId) return;
+    const data = await getCurrentExtraVault(profile.userId);
+    setGenerationState(data.generation_state);
+    const mappedExtras = data.extra_vault.map((item) => ({
+      id: item.id,
+      replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
+      url: item.url,
+      createdAt: item.created_at ?? null,
+    }));
+    setExtraSlots(mappedExtras);
+    setSelectedExtraIds((previous) => {
+      const valid = previous.filter((id) => mappedExtras.some((slot) => slot.id === id));
+      return valid.length ? valid : mappedExtras.slice(0, 16).map((slot) => slot.id);
+    });
+  };
+
   const toggleExtraSelection = (id: string) => {
-    setSelectedExtraIds((prev) => {
-      if (prev.includes(id)) {
-        return prev.filter((selectedId) => selectedId !== id);
-      }
-      if (prev.length >= 16) {
-        setError('เลือก Extra ได้สูงสุด 16 รูป');
-        return prev;
+    setSelectedExtraIds((previous) => {
+      if (previous.includes(id)) return previous.filter((selectedId) => selectedId !== id);
+      if (previous.length >= 16) {
+        setError('Select up to 16 extra stickers.');
+        return previous;
       }
       setError(null);
-      return [...prev, id];
+      return [...previous, id];
     });
   };
 
   const handleBuyExtraPack = async () => {
     if (selectedExtraIds.length === 0) {
-      setError('เลือก Extra อย่างน้อย 1 รูปก่อนซื้อแพ็ก 99 บาท');
+      setError('Select at least one extra sticker before payment.');
       return;
     }
     await beginPayment('extra_pack_99', selectedExtraIds);
   };
 
-  const handleDownloadExtraVault = async () => {
+  const handleDownloadExtras = async () => {
     if (!profile?.userId) return;
     const idsToExport = generationState?.extra_pack_selected_ids?.length
       ? generationState.extra_pack_selected_ids
       : selectedExtraIds;
     if (idsToExport.length === 0) {
-      setError('เลือก Extra อย่างน้อย 1 รูปก่อน export');
+      setError('Select at least one extra sticker before export.');
       return;
     }
     try {
       setIsExtraExporting(true);
-      setError(null);
       const { url, generation_state } = await getExtraVaultDownloadUrl(profile.userId, idsToExport);
       setGenerationState(generation_state);
       openDownloadUrl(url);
+      await refreshExtraVault().catch(() => null);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
-      if (detail?.generation_state) {
-        setGenerationState(detail.generation_state);
-      }
+      if (detail?.generation_state) setGenerationState(detail.generation_state);
       setError(detail?.error_code === 'payment_required'
-        ? 'กรุณาชำระแพ็ก Extra 99 บาทก่อน export'
-        : detail || err?.message || 'Failed to export Extra Vault.');
+        ? 'Please unlock Extra Pack 99 THB before export.'
+        : typeof detail === 'string'
+          ? detail
+          : err?.message || 'Failed to export Extra Vault.');
     } finally {
       setIsExtraExporting(false);
     }
   };
 
-  const sanitizeFileName = (value: string) => {
-    const cleaned = value.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '');
-    return cleaned || 'stickers';
-  };
-
-  const isIOSDevice = () => {
-    const ua = navigator.userAgent || '';
-    return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
-  };
-
-  const isAndroidDevice = () => /Android/i.test(navigator.userAgent || '');
-
-  const isMobileDevice = () => {
-    const ua = navigator.userAgent || '';
-    return /Android|webOS|iPhone|iPad|iPod/i.test(ua) || (navigator.maxTouchPoints ?? 0) > 1;
-  };
-
-  const isLiffInClient = () => {
-    const liffSdk = (window as any).liff;
-    return Boolean(liffSdk?.isInClient?.());
-  };
-
-  const supportsFileShare = () =>
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    typeof File !== 'undefined';
-
-  const shouldContinueSaveToPhotosInExternalBrowser = () => {
-    const currentUrl = new URL(window.location.href);
-    return currentUrl.searchParams.get(SAVE_TO_PHOTOS_PARAM) === SAVE_TO_PHOTOS_PARAM_VALUE;
-  };
-
-  const clearSaveToPhotosIntent = () => {
-    const currentUrl = new URL(window.location.href);
-    currentUrl.searchParams.delete(SAVE_TO_PHOTOS_PARAM);
-    window.history.replaceState({}, document.title, currentUrl.toString());
-  };
-
-  const buildExternalBrowserSaveToPhotosUrl = () => {
-    const currentUrl = new URL(window.location.href);
-    currentUrl.searchParams.set(SAVE_TO_PHOTOS_PARAM, SAVE_TO_PHOTOS_PARAM_VALUE);
-    return currentUrl.toString();
-  };
-
-  const openDownloadUrl = (url: string) => {
-    const liffSdk = (window as any).liff;
-    if (liffSdk?.isInClient?.()) {
-      liffSdk.openWindow({ url, external: true });
-      return;
-    }
-
-    if (isIOSDevice()) {
-      window.location.href = url;
-      return;
-    }
-
-    const link = document.createElement('a');
-    link.href = url;
-    link.rel = 'noopener';
-    link.target = '_blank';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const triggerBlobDownload = (blob: Blob, fileName: string) => {
-    const objectUrl = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = objectUrl;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
-  };
-
-  const downloadStickerPngs = async (stickers: Array<{ blob: Blob; fileName: string }>) => {
-    for (const sticker of stickers) {
-      triggerBlobDownload(sticker.blob, sticker.fileName);
-      await new Promise((resolve) => window.setTimeout(resolve, DOWNLOAD_DELAY_MS));
-    }
-  };
-
-  const finalizeFinalPackExport = async (userId: string) => {
-    const result = await finalizeCurrentStickerExport(userId);
-    setGenerationState(result.generation_state);
-    setExtraPickSlots(
-      (result.extra_vault ?? []).map((item) => ({
-        id: item.id,
-        replacedFromSlot: typeof item.replaced_from_slot === 'number' ? item.replaced_from_slot : null,
-        url: item.url,
-        createdAt: item.created_at ?? null,
-      })),
-    );
-    setSelectedExtraIds([]);
-  };
-
-  const continueSaveToPhotos = async (userId: string) => {
-    let stickers: Array<{ blob: Blob; fileName: string }> = [];
-
-    try {
-      setIsSharingToPhotos(true);
-      setError(null);
-
-      const saveBatchId = buildSaveToPhotosBatchId();
-      stickers = await Promise.all(
-        stickerSlots.map(async (_slot, index) => {
-          const blob = await downloadCurrentStickerForShare(userId, index);
-          const fileName = buildStickerPngFileName(index, saveBatchId);
-          return {
-            blob,
-            fileName,
-          };
-        }),
-      );
-
-      if (supportsFileShare()) {
-        const files = stickers.map(
-          (sticker) => new File([sticker.blob], sticker.fileName, { type: sticker.blob.type || 'image/png' }),
-        );
-        const canShareFiles =
-          typeof navigator.canShare === 'function' ? navigator.canShare({ files }) : true;
-
-        if (canShareFiles) {
-          await navigator.share({
-            title: 'LINE Sticker PNG Set',
-            files,
-          });
-          await finalizeFinalPackExport(userId);
-          return;
-        }
-      }
-
-      if (!supportsFileShare() && !isAndroidDevice()) {
-        setError('อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน');
-        return;
-      }
-
-      await downloadStickerPngs(stickers);
-      await finalizeFinalPackExport(userId);
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        return;
-      }
-
-      const message = err?.response?.data?.detail || err?.message || 'Save to Photos failed.';
-      const isSharePermissionDenied =
-        err?.name === 'NotAllowedError' || /permission denied|notallowederror/i.test(message);
-
-      if (isAndroidDevice() && stickers.length > 0 && isSharePermissionDenied) {
-        await downloadStickerPngs(stickers);
-        await finalizeFinalPackExport(userId);
-        return;
-      }
-
-      setError(
-        /fetch|load failed|networkerror|prepare sticker/i.test(message)
-          ? 'ไม่สามารถเตรียมไฟล์ PNG สำหรับ Save to Photos ได้ กรุณาลองใหม่อีกครั้ง'
-          : message,
-      );
-    } finally {
-      setIsSharingToPhotos(false);
-    }
-  };
-
-  const handleDownload = async () => {
-    if (!profile?.userId || !isSupportedStickerCount(stickerSlots.length)) {
-      setError('Download is not ready yet. Please generate stickers first.');
-      return;
-    }
-
-    if (!generationState?.final_pack_paid) {
-      await beginPayment('final_pack_199');
-      return;
-    }
-
-    try {
-      setIsDownloading(true);
-      const { url } = await getCurrentStickersDownloadUrl(profile.userId);
-      if (!url) {
-        throw new Error('Download URL is unavailable.');
-      }
-
-      openDownloadUrl(url);
-      await finalizeFinalPackExport(profile.userId);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      if (detail?.generation_state) {
-        setGenerationState(detail.generation_state);
-      }
-      const message = detail?.error_code === 'payment_required'
-        ? 'กรุณาชำระแพ็ก 199 บาทก่อนบันทึกสติกเกอร์'
-        : detail || err?.message || 'Failed to download stickers.';
-      setError(message);
-    } finally {
-      setIsDownloading(false);
-    }
-  };
-
-  const handleSaveToPhotos = async () => {
-    if (!profile?.userId || !isSupportedStickerCount(stickerSlots.length)) {
-      setError('Save to Photos is not ready yet. Please generate stickers first.');
-      return;
-    }
-
-    if (!generationState?.final_pack_paid) {
-      await beginPayment('final_pack_199');
-      return;
-    }
-
-    if (isAndroidDevice() && isLiffInClient()) {
-      openDownloadUrl(buildExternalBrowserSaveToPhotosUrl());
-      return;
-    }
-
-    if (shouldContinueSaveToPhotosInExternalBrowser()) {
-      clearSaveToPhotosIntent();
-    }
-
-    await continueSaveToPhotos(profile.userId);
-  };
-
-  const handleOpenLineOA = () => {
-    const lineOaUrl = 'https://line.me/R/ti/p/@825drmlj';
-
-    if (isLiffInClient()) {
-      (window as any).liff.openWindow({ url: lineOaUrl, external: false });
-      return;
-    }
-
-    window.open(lineOaUrl, '_blank');
-  };
-
   const handleOpenStickerMaker = () => {
-    const androidPackage = 'com.linecorp.usersticker';
-    const iosAppStoreId = '1239684967';
-    const customScheme = 'linestudio://';
-    const appStoreUrl = `https://apps.apple.com/app/id${iosAppStoreId}`;
-    const playStoreUrl = `https://play.google.com/store/apps/details?id=${androidPackage}`;
-    const liffSdk = (window as any).liff;
+    window.open('https://creator.line.me/stickermaker/', '_blank', 'noopener,noreferrer');
+  };
 
-    if (isAndroidDevice()) {
-      const intentUrl = `intent://#Intent;package=${androidPackage};scheme=linestudio;end;`;
-
-      if (isLiffInClient()) {
-        liffSdk.openWindow({ url: intentUrl, external: true });
-        return;
-      }
-
-      window.location.href = intentUrl;
-      return;
+  const renderView = () => {
+    if (currentView === 'checkout' && activeCheckoutProduct) {
+      return (
+        <CheckoutView
+          productId={activeCheckoutProduct}
+          finalPackPaid={finalPackPaid}
+          extraCount={extraSlots.length}
+          selectedExtraCount={selectedExtraIds.length}
+          onBack={() => setCheckoutProduct(null)}
+          onClose={() => setCheckoutProduct(null)}
+          onPay={() => beginPayment(activeCheckoutProduct, activeCheckoutProduct === 'extra_pack_99' ? selectedExtraIds : [])}
+          onSave={handleSaveFinalPack}
+          isBusy={isCreatingPayment === activeCheckoutProduct || isSavingFinal}
+        />
+      );
     }
 
-    if (isIOSDevice()) {
-      let didLeavePage = false;
-      let fallbackTimer: number | null = null;
-
-      const cleanup = () => {
-        if (fallbackTimer !== null) {
-          window.clearTimeout(fallbackTimer);
-          fallbackTimer = null;
-        }
-        window.removeEventListener('pagehide', handlePageHide);
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-      };
-
-      const handlePageHide = () => {
-        didLeavePage = true;
-        cleanup();
-      };
-
-      const handleVisibilityChange = () => {
-        if (!document.hidden) return;
-        didLeavePage = true;
-        cleanup();
-      };
-
-      window.addEventListener('pagehide', handlePageHide, { once: true });
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-
-      fallbackTimer = window.setTimeout(() => {
-        cleanup();
-        if (didLeavePage || document.hidden) return;
-
-        if (isLiffInClient()) {
-          liffSdk.openWindow({ url: appStoreUrl, external: true });
-          return;
-        }
-
-        window.location.href = appStoreUrl;
-      }, 1500);
-
-      if (isLiffInClient()) {
-        liffSdk.openWindow({ url: customScheme, external: true });
-        return;
-      }
-
-      window.location.href = customScheme;
-      return;
+    if (currentView === 'success') {
+      return (
+        <SuccessView
+          stickerSlots={stickerSlots}
+          extraSlots={extraSlots}
+          selectedExtraIds={selectedExtraIds}
+          extraPackPaid={extraPackPaid}
+          isBusy={isCreatingPayment === 'extra_pack_99' || isExtraExporting}
+          onToggleExtra={toggleExtraSelection}
+          onSelectFirst16={() => setSelectedExtraIds(extraSlots.slice(0, 16).map((slot) => slot.id))}
+          onClearExtras={() => setSelectedExtraIds([])}
+          onPayExtra={handleBuyExtraPack}
+          onDownloadExtras={handleDownloadExtras}
+          onDownloadFinal={handleDownloadFinalAgain}
+          onOpenStickerMaker={handleOpenStickerMaker}
+        />
+      );
     }
 
-    window.open(playStoreUrl, '_blank');
-  };
-
-  const markPromptGuideSeen = () => {
-    if (!hasSeenPromptGuide) {
-      setHasSeenPromptGuide(true);
+    if (currentView === 'grid') {
+      return (
+        <GridView
+          stickerSlots={stickerSlots}
+          selectedCount={lockedCount}
+          finalPackPaid={finalPackPaid}
+          loading={loading}
+          helperText={helperText}
+          error={error}
+          onToggle={toggleStickerLock}
+          onRegenerate={generateSheet}
+          onContinue={() => setCheckoutProduct('final_pack_199')}
+          onSelectAll={() => setStickerSlots((previous) => previous.map((slot) => ({ ...slot, locked: true })))}
+          onClearAll={() => setStickerSlots((previous) => previous.map((slot) => ({ ...slot, locked: false })))}
+        />
+      );
     }
 
-    try {
-      window.localStorage.setItem(PROMPT_GUIDE_SEEN_KEY, '1');
-    } catch {
-      // Non-blocking: prompt tips should still work without localStorage.
-    }
+    return (
+      <GeneratorView
+        config={config}
+        loading={loading}
+        canGenerate={canGenerate}
+        loadingHeadline={loadingHeadline}
+        loadingSubtext={loadingSubtext}
+        simulatedProgress={simulatedProgress}
+        generateLabel={loading ? loadingHeadline : 'Generate'}
+        helperText={helperText || error}
+        onUploadClick={openImagePicker}
+        onImageUpload={handleImageUpload}
+        onStyleChange={(style) => setConfig((previous) => ({ ...previous, style }))}
+        onPromptChange={(prompt) => setConfig((previous) => ({ ...previous, extraPrompt: prompt }))}
+        onGenerate={generateSheet}
+        fileInputRef={fileInputRef}
+      />
+    );
   };
-
-  const openPromptGuide = () => {
-    setIsPromptGuideOpen(true);
-  };
-
-  const closePromptGuide = () => {
-    markPromptGuideSeen();
-    setIsPromptGuideOpen(false);
-  };
-
-  const handlePromptFocus = () => {
-    if (hasSeenPromptGuide) return;
-    markPromptGuideSeen();
-    setIsPromptGuideOpen(true);
-  };
-
-  const handleUsePromptExample = () => {
-    setConfig((prev) => ({ ...prev, extraPrompt: PROMPT_GUIDE_EXAMPLE }));
-    closePromptGuide();
-  };
-
-  const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
-  const currentStickerCount = stickerSlots.length;
-  const isMobile = isMobileDevice();
-  const isAndroid = isAndroidDevice();
-  const isInLiffClient = isLiffInClient();
-  const shouldResumeSaveToPhotos = shouldContinueSaveToPhotosInExternalBrowser() && !isInLiffClient;
-  const canReuseExisting = isSupportedStickerCount(currentStickerCount);
-  const unlockedCount = currentStickerCount > 0 ? currentStickerCount - lockedCount : DEFAULT_STICKER_COUNT;
-  const regenerateCount = canReuseExisting ? unlockedCount : DEFAULT_STICKER_COUNT;
-  const keepCount = canReuseExisting ? lockedCount : 0;
-  const finalPackPaid = Boolean(generationState?.final_pack_paid);
-  const finalPackExported = Boolean(generationState?.final_pack_exported);
-  const extraPackPaid = Boolean(generationState?.extra_pack_paid);
-  const isGenerationLocked = Boolean(generationState?.is_generation_locked);
-  const attemptCount = generationState?.generation_count ?? 0;
-  const attemptLimit = generationState?.generation_limit ?? 20;
-  const remainingAttempts = generationState?.remaining_attempts ?? attemptLimit;
-  const cooldownLabel = formatCountdown(generationState?.generation_cooldown_until);
-  void clockTick;
-  const canGenerate = Boolean(config.base64Image)
-    && isOnline
-    && !isGenerationLocked
-    && !(finalPackPaid && !finalPackExported)
-    && (!hasGenerated || lockedCount < currentStickerCount);
-  const generateButtonLabel = loading
-    ? 'Generating...'
-    : isGenerationLocked
-      ? 'Trial Limit Reached'
-      : finalPackPaid && !finalPackExported
-        ? 'Final Pack Unlocked'
-    : hasGenerated
-      ? lockedCount > 0
-        ? `Regenerate ${regenerateCount} Slots`
-        : 'Generate All Again'
-      : 'Generate';
-  const generateHelperText = loading
-    ? '🔄 Generating'
-    : generationState?.warning?.message
-      ? generationState.warning.message
-    : hasGenerated && currentStickerCount > 0 && lockedCount === currentStickerCount
-      ? 'เลือกปลดอย่างน้อย 1 รูปเพื่อเริ่มรอบถัดไป'
-      : hasGenerated
-        ? `รอบถัดไปจะคงไว้ ${keepCount} รูป และสร้างใหม่ ${regenerateCount} รูป`
-        : '';
-  const selectionHeading = hasGenerated
-    ? lockedCount === 0
-      ? 'ยังไม่ได้เลือกภาพที่จะเก็บไว้'
-      : `เก็บไว้แล้ว ${keepCount} รูป`
-    : 'อัปโหลดรูปแล้วเริ่มสร้างได้ทันที';
-  const selectionSubtext = hasGenerated
-    ? lockedCount === currentStickerCount
-      ? 'ตอนนี้ทั้งชุดถูกเก็บไว้ทั้งหมด ปลดอย่างน้อย 1 รูปก่อนกด regenerate รอบใหม่'
-      : 'แตะรูปที่ชอบเพื่อเก็บ slot เดิมไว้ รอบถัดไประบบจะสร้างเฉพาะรูปที่ไม่ถูกเลือก'
-    : 'รอบแรกระบบจะสร้างครบ 16 รูป จากรูปต้นฉบับและ concept ที่กรอกไว้';
-
-  const loadingHeadline =
-    processingStep === 'analyzing'
-      ? 'กำลังเตรียมภาพต้นฉบับ'
-      : processingStep === 'generating'
-        ? `กำลังสร้างสติ๊กเกอร์ ${simulatedStickerCount}/${generationTargetCount}`
-        : processingStep === 'removing'
-          ? 'กำลังเตรียมไฟล์ PNG'
-          : 'พร้อมใช้งาน';
-
-  const loadingSubtext =
-    processingStep === 'analyzing'
-      ? 'กำลังจัดองค์ประกอบตัวละคร'
-      : processingStep === 'generating'
-        ? isComplianceChecking
-          ? 'กำลังตรวจสอบกฎระเบียบของ LINE'
-          : `กำลังเรนเดอร์สติ๊กเกอร์ ${simulatedStickerCount}/${generationTargetCount}`
-        : processingStep === 'removing'
-          ? 'กำลังตัดพื้นหลังสีเขียว'
-          : 'Ready';
-
-  const simulatedProgress =
-    processingStep === 'analyzing'
-      ? 12
-      : processingStep === 'generating'
-        ? 16 + Math.round((simulatedStickerCount / generationTargetCount) * 64)
-        : processingStep === 'removing'
-          ? 92
-          : processingStep === 'complete'
-            ? 100
-            : 0;
 
   return (
-    <PageLayout isOnline={isOnline}>
-      <main id="main-content" className="mx-auto flex w-full max-w-md flex-col gap-3 px-4 pb-6 pt-3 sm:max-w-xl" aria-busy={loading}>
-        <section className="flex flex-row items-center justify-between gap-3 rounded-[2.25rem] sm:rounded-[3.5rem] border border-slate-100 border-b-[6px] border-b-slate-200/50 bg-white px-5 py-5 sm:px-10 sm:py-8 shadow-[0_20px_40px_-10px_rgba(0,0,0,0.06)]">
-          <div className="flex flex-col gap-1 sm:gap-2 min-w-0">
-            <p className="text-[10px] sm:text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Trial Status</p>
-            <p className="text-xl sm:text-3xl font-extrabold tracking-tight text-slate-800 whitespace-nowrap">
-              {attemptCount}/{attemptLimit} <span className="text-sm sm:text-xl font-bold text-slate-800">attempts</span>
-            </p>
-            <p className="text-xs font-semibold text-slate-500">
-              {isGenerationLocked && cooldownLabel
-                ? `เริ่มใหม่ได้ใน ${cooldownLabel}`
-                : finalPackPaid
-                  ? 'Final pack unlocked'
-                  : `เหลือ ${remainingAttempts} ครั้งก่อนครบโควต้าทดลอง`}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => beginPayment('final_pack_199')}
-            disabled={isCreatingPayment === 'final_pack_199' || !isSupportedStickerCount(currentStickerCount) || finalPackPaid}
-            className="focus-ring flex shrink-0 min-h-[3rem] sm:min-h-[4rem] items-center rounded-full bg-[#10b981] px-5 sm:px-8 py-2 text-sm sm:text-lg font-bold text-white shadow-[0_8px_20px_-4px_rgba(16,185,129,0.4)] transition-all hover:bg-[#059669] active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-400 whitespace-nowrap"
-          >
-            {finalPackPaid ? 'Unlocked' : isCreatingPayment === 'final_pack_199' ? 'Opening...' : 'Save 199 THB'}
-          </button>
-        </section>
-        <section className="overflow-hidden rounded-[2.5rem] border border-slate-200 bg-white shadow-sm" aria-labelledby="upload-heading">
-          <h2 id="upload-heading" className="sr-only">
-            Source photo
-          </h2>
-
-          <input
-            id="source-image-input"
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleImageUpload}
-            className="sr-only"
-          />
-
-          <div className="relative overflow-hidden rounded-[2.5rem] bg-gradient-to-b from-slate-50 to-slate-100/80">
-            <button
-              type="button"
-              onClick={openImagePicker}
-              className="focus-ring relative block aspect-[11/10] w-full overflow-hidden sm:aspect-[4/3]"
-              aria-label="Choose or capture source photo"
-            >
-              {config.base64Image ? (
-                <img
-                  src={config.base64Image}
-                  alt="Uploaded source preview"
-                  className={`h-full w-full object-cover ${loading ? 'opacity-60' : ''}`}
-                />
-              ) : (
-                <span className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
-                  <span className="flex h-20 w-20 items-center justify-center rounded-full bg-white/95 text-slate-700 shadow-lg ring-1 ring-slate-200">
-                    <svg className="h-11 w-11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-                    </svg>
-                  </span>
-                </span>
-              )}
-              <span className="sr-only">Open camera or photo library</span>
-            </button>
-
-            {!config.base64Image && (
-              <div className="pointer-events-none absolute inset-x-0 bottom-4 flex items-center justify-center gap-2" aria-hidden="true">
-                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-white/90 text-slate-700 shadow-sm ring-1 ring-slate-200">
-                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path
-                      d="M4 8h3l2-2h6l2 2h3v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <circle cx="12" cy="13" r="3.5" />
-                  </svg>
-                </span>
-                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-white/90 text-slate-700 shadow-sm ring-1 ring-slate-200">
-                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="4" y="5" width="16" height="14" rx="2" />
-                    <path d="m8 13 2-2 4 4 2-2 2 2" strokeLinecap="round" strokeLinejoin="round" />
-                    <circle cx="9" cy="9" r="1.25" />
-                  </svg>
-                </span>
-              </div>
-            )}
-
-            {config.base64Image && !loading && (
-              <button
-                type="button"
-                onClick={openImagePicker}
-                className="focus-ring absolute bottom-3 right-3 flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-slate-700 shadow-sm ring-1 ring-slate-200"
-                aria-label="Replace source photo"
-              >
-                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path
-                    d="M4 8h3l2-2h6l2 2h3v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <circle cx="12" cy="13" r="3.5" />
-                </svg>
-              </button>
-            )}
-
-            {loading && (
-              <div className="pointer-events-none absolute inset-0 flex items-end p-3">
-                <div
-                  className="w-full rounded-2xl bg-black/25 p-3 text-white backdrop-blur-[2px]"
-                  role="status"
-                  aria-live="polite"
-                  aria-atomic="true"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" aria-hidden="true" />
-                    <p className="text-sm font-semibold text-white">{loadingHeadline}</p>
-                  </div>
-                  <p className="mt-1 text-xs text-white/90">{loadingSubtext}</p>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/30">
-                    <span
-                      className="block h-full rounded-full bg-indigo-300 transition-all duration-500"
-                      style={{ width: `${simulatedProgress}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-        </section>
-
-        <section className="relative rounded-[2.5rem] border border-slate-100 bg-white p-7 shadow-[0_15px_40px_rgba(0,0,0,0.04)]">
-          <div className="space-y-6">
-            <section className="rounded-[2rem] border border-sky-100 bg-[radial-gradient(circle_at_top_left,_rgba(125,211,252,0.25),_transparent_45%),linear-gradient(135deg,_#f8fbff_0%,_#eef6ff_100%)] p-5">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-sky-500">Regenerate Flow</p>
-                  <h2 className="mt-2 text-xl font-black tracking-tight text-slate-900">{selectionHeading}</h2>
-                  <p className="mt-2 max-w-md text-sm leading-6 text-slate-600">{selectionSubtext}</p>
-                </div>
-                <div className="rounded-2xl border border-white/80 bg-white/90 px-4 py-3 text-right shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Next Round</p>
-                  <p className="mt-1 text-2xl font-black tracking-tight text-slate-900">{regenerateCount}</p>
-                  <p className="text-xs font-medium text-slate-500">slots to generate</p>
-                </div>
-              </div>
-
-              <div className="mt-4 grid grid-cols-3 gap-3">
-                <div className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Keep</p>
-                  <p className="mt-1 text-2xl font-black text-emerald-600">{keepCount}</p>
-                </div>
-                <div className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Regen</p>
-                  <p className="mt-1 text-2xl font-black text-sky-600">{regenerateCount}</p>
-                </div>
-                <div className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Final Pack</p>
-                  <p className="mt-1 text-2xl font-black text-slate-900">{currentStickerCount || DEFAULT_STICKER_COUNT}</p>
-                </div>
-              </div>
-            </section>
-
-            <fieldset>
-              <legend className="text-2xl font-black tracking-tight text-slate-800">Style</legend>
-              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                {STYLE_OPTIONS.map((styleOption) => {
-                  const selected = config.style === styleOption.value;
-                  return (
-                    <label
-                      key={styleOption.value}
-                      className={`relative flex cursor-pointer items-center gap-4 overflow-hidden rounded-[1.5rem] border-2 p-3 transition-all duration-300 ${selected
-                        ? 'border-indigo-400 bg-indigo-50/30 shadow-[0_0_20px_rgba(99,102,241,0.15)]'
-                        : 'border-slate-100 bg-white hover:border-slate-200 shadow-sm'
-                        }`}
-                    >
-                      {/* Active State Glass Effect + Sparkles */}
-                      {selected && (
-                        <>
-                          <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/10 via-purple-500/10 to-pink-500/10 backdrop-blur-[2px]" />
-                          <svg className="absolute inset-0 h-full w-full opacity-40 pointer-events-none" viewBox="0 0 100 100">
-                            <circle cx="20" cy="30" r="0.8" fill="white" className="animate-pulse" />
-                            <circle cx="75" cy="65" r="1.2" fill="white" className="animate-pulse" style={{ animationDelay: '0.5s' }} />
-                            <circle cx="40" cy="85" r="0.8" fill="white" className="animate-pulse" style={{ animationDelay: '1s' }} />
-                            <circle cx="85" cy="15" r="1.0" fill="white" className="animate-pulse" style={{ animationDelay: '0.2s' }} />
-                          </svg>
-                        </>
-                      )}
-
-                      <div className={`relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${selected ? 'border-indigo-500 bg-indigo-500' : 'border-slate-200'
-                        }`}>
-                        {selected && <div className="h-2 w-2 rounded-full bg-white shadow-[0_0_8px_white]" />}
-                      </div>
-
-                      <div className={`relative z-10 flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-100 shadow-inner transition-transform duration-500 ${selected ? 'scale-110' : ''}`}>
-                        <img
-                          src={styleOption.previewSrc}
-                          alt={styleOption.label}
-                          className="h-full w-full object-contain"
-                        />
-                      </div>
-
-                      <div className="relative z-10 min-w-0">
-                        <span className="block text-lg font-black leading-none text-slate-800">{styleOption.label}</span>
-                        <span className="mt-1 block text-sm font-bold text-slate-600/80">{styleOption.title}</span>
-                        <span className="mt-0.5 block text-xs font-medium text-slate-400">{styleOption.hint}</span>
-                      </div>
-
-                      <input
-                        type="radio"
-                        name="sticker-style"
-                        value={styleOption.value}
-                        checked={selected}
-                        onChange={() => setConfig((prev) => ({ ...prev, style: styleOption.value }))}
-                        className="sr-only"
-                      />
-                    </label>
-                  );
-                })}
-              </div>
-            </fieldset>
-
-            <div className="space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-xl font-black tracking-tight text-slate-800">Concept</h3>
-                <button
-                  type="button"
-                  onClick={openPromptGuide}
-                  className="focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 shadow-sm transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
-                >
-                  <svg
-                    className="h-4 w-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M12 17v-5" />
-                    <path d="M12 8h.01" />
-                  </svg>
-                  Prompt tips
-                </button>
-              </div>
-              <div className="overflow-hidden rounded-[2rem] bg-slate-50/50 p-4 ring-1 ring-slate-100">
-                <div className="relative flex items-start gap-3">
-                  <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-50 shadow-sm ring-1 ring-blue-100">
-                    <svg className="h-5 w-5 fill-blue-500 text-blue-500 drop-shadow-[0_0_8px_rgba(59,130,246,0.6)]" viewBox="0 0 24 24">
-                      <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" />
-                    </svg>
-                  </div>
-                  <textarea
-                    id="prompt-details"
-                    value={config.extraPrompt}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, extraPrompt: e.target.value }))}
-                    onFocus={handlePromptFocus}
-                    placeholder="Describe your image..."
-                    rows={2}
-                    className="w-full resize-none bg-transparent py-1 text-base font-medium text-slate-700 placeholder:text-slate-400 focus:outline-none"
-                  />
-                </div>
-                <div className="mt-3 border-t border-slate-200/50 pt-3">
-                  <p className="text-xs font-semibold text-slate-400">
-                    e.g. "A boy wearing hoodie in cyberpunk city"
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={generateSheet}
-                disabled={
-                  loading
-                  || !canGenerate
-                }
-                className="relative h-16 w-full overflow-hidden rounded-full font-black text-white shadow-2xl transition-all hover:scale-[1.01] hover:shadow-indigo-500/25 active:scale-95 disabled:grayscale disabled:opacity-50"
-              >
-                {/* Vibrant Gradient Background */}
-                <div className="absolute inset-0 bg-gradient-to-r from-blue-400 via-indigo-500 to-purple-600 animate-gradient-x" />
-                
-                {/* Particle Overlay */}
-                <svg className="absolute inset-0 h-full w-full opacity-30" viewBox="0 0 100 100">
-                  <circle cx="10" cy="20" r="1" fill="white" className="animate-pulse" />
-                  <circle cx="90" cy="50" r="0.8" fill="white" className="animate-pulse" />
-                  <circle cx="30" cy="80" r="1.2" fill="white" className="animate-pulse" />
-                  <circle cx="60" cy="20" r="0.5" fill="white" className="animate-pulse" />
-                </svg>
-
-                <span className="relative z-10 flex items-center justify-center gap-2 text-xl tracking-wide">
-                  {loading && <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />}
-                  {generateButtonLabel}
-                </span>
-              </button>
-            </div>
-          </div>
-        </section>
-
-            {generateHelperText && (
-              <p id="generate-helper" className="text-sm text-slate-700" role="status" aria-live="polite">
-                {generateHelperText}
-              </p>
-            )}
-
-        {isGenerationLocked && !finalPackPaid ? (
-          <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status" aria-live="polite">
-            <p className="font-bold">ครบโควต้าทดลองแล้ว</p>
-            <p className="mt-1">
-              ปลดล็อกแพ็ก 199 บาทเพื่อบันทึก final 16 รูป หรือรอ {cooldownLabel ?? '24 ชม.'} เพื่อเริ่มรอบใหม่
-            </p>
-            <button
-              type="button"
-              onClick={() => beginPayment('final_pack_199')}
-              disabled={isCreatingPayment === 'final_pack_199' || !isSupportedStickerCount(currentStickerCount)}
-              className="focus-ring mt-3 min-h-11 rounded-2xl bg-amber-500 px-4 py-2 text-sm font-bold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-400"
-            >
-              {isCreatingPayment === 'final_pack_199' ? 'Opening payment...' : 'Unlock final pack - 199 THB'}
-            </button>
-          </section>
-        ) : null}
-
-        {error && (
-          <div className="rounded-2xl border border-red-300 bg-red-50 p-4 text-sm text-red-800" role="alert" aria-live="assertive">
-            {error}
-          </div>
-        )}
-
-        {transparentImageUrl && (
-          <section
-            ref={resultRef}
-            className="rounded-[2.5rem] border border-slate-200 bg-white p-6 shadow-sm"
-            aria-labelledby="preview-heading"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 id="preview-heading" className="text-lg font-semibold text-slate-900">
-                Preview
-              </h2>
-              <span className="rounded-full bg-green-100 px-3 py-1 text-sm font-medium text-green-800">PNG ready</span>
-            </div>
-
-            {isSupportedStickerCount(currentStickerCount) ? (
-              <>
-                <div className="mt-4 rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">เลือกภาพที่ต้องการเก็บไว้ในรอบถัดไป</p>
-                      <p className="mt-1 text-sm text-slate-600">
-                        รูปที่มีเครื่องหมายถูกจะคงอยู่ที่ slot เดิม ส่วนที่ไม่ได้เลือกจะถูก generate ใหม่
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
-                      Keep {lockedCount}/{currentStickerCount}
-                    </span>
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAllStickerLocks(true)}
-                      disabled={loading || lockedCount === currentStickerCount}
-                      className="focus-ring rounded-full border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 transition hover:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Keep All
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAllStickerLocks(false)}
-                      disabled={loading || lockedCount === 0}
-                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-sky-400 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Generate All Again
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 sm:gap-3">
-                  {stickerSlots.map((slot, index) => (
-                    <button
-                      type="button"
-                      key={slot.id}
-                      onClick={() => toggleStickerLock(index)}
-                      disabled={loading}
-                      aria-pressed={slot.locked}
-                      aria-label={`${slot.locked ? 'Keep' : 'Regenerate'} sticker ${index + 1}`}
-                      className={`relative block overflow-hidden rounded-2xl border bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-[3px] transition ${slot.locked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200 hover:border-sky-300'
-                        }`}
-                    >
-                      <img
-                        src={slot.url}
-                        alt={`Sticker ${index + 1}`}
-                        className="focus-ring aspect-square w-full rounded-xl bg-white object-contain"
-                      />
-                      <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-black/72 px-2 py-1 text-[11px] font-semibold text-white shadow-sm">
-                        Slot {index + 1}
-                      </span>
-                      {slot.locked && (
-                        <>
-                          <span className="pointer-events-none absolute inset-[3px] rounded-xl bg-emerald-400/20" aria-hidden="true" />
-                          <span
-                            className="pointer-events-none absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/90 text-xs font-bold text-white shadow"
-                            aria-hidden="true"
-                          >
-                            ✓
-                          </span>
-                          <span className="pointer-events-none absolute bottom-2 left-2 rounded-full bg-emerald-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
-                            Keep
-                          </span>
-                        </>
-                      )}
-                      {!slot.locked && (
-                        <span className="pointer-events-none absolute bottom-2 left-2 rounded-full bg-sky-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
-                          Regenerate
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="mt-5 overflow-hidden rounded-[2rem] border border-slate-200 bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYGAQYcAP3uCTZhw1gGGYhAGBZIA/nYDCgHQAmUPwdICYAOIyDPr5CABdamAivXkrFgAAAABJRU5ErkJggg==')] bg-repeat p-2">
-                <img
-                  src={transparentImageUrl}
-                  alt="Generated transparent sticker sheet preview"
-                  className="aspect-square w-full rounded-[1.5rem] bg-white object-contain"
-                />
-              </div>
-            )}
-
-            <div className="mt-4 space-y-2">
-              {isMobile ? (
-                <button
-                  type="button"
-                  onClick={handleSaveToPhotos}
-                  disabled={isSharingToPhotos || !isSupportedStickerCount(currentStickerCount)}
-                  className="focus-ring min-h-11 w-full rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-                >
-                  {isSharingToPhotos
-                    ? 'Preparing PNGs...'
-                    : finalPackPaid
-                      ? 'Save to Photos'
-                      : isCreatingPayment === 'final_pack_199'
-                        ? 'Opening payment...'
-                        : 'Unlock & Save - 199 THB'}
-                </button>
-              ) : null}
-
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={isDownloading || !isSupportedStickerCount(currentStickerCount)}
-                className={`focus-ring min-h-11 w-full rounded-2xl border px-4 py-3 text-sm font-semibold ${
-                  isMobile
-                    ? 'border-slate-300 bg-white text-slate-900 hover:border-indigo-500 hover:text-indigo-700'
-                    : 'border-slate-300 bg-white text-slate-900 hover:border-indigo-500 hover:text-indigo-700'
-                } disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400`}
-              >
-                {isDownloading
-                  ? 'Preparing ZIP...'
-                  : finalPackPaid
-                    ? 'Download ZIP'
-                    : isCreatingPayment === 'final_pack_199'
-                      ? 'Opening payment...'
-                      : 'Unlock ZIP - 199 THB'}
-              </button>
-
-              <div className="flex flex-col gap-2 border-t border-slate-100 pt-2">
-                <button
-                  type="button"
-                  onClick={handleOpenLineOA}
-                  className="focus-ring flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl bg-[#00B900] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#009900]"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="h-4 w-4"
-                    aria-hidden="true"
-                  >
-                    <path d="M7 10h10" />
-                    <path d="M7 14h6" />
-                    <path d="M21 11.5a8.5 8.5 0 0 1-12.61 7.48L3 21l2.02-5.39A8.5 8.5 0 1 1 21 11.5Z" />
-                  </svg>
-                  <span>ติดต่อแอดมิน @825drmlj</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleOpenStickerMaker}
-                  className="focus-ring flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl border-2 border-[#00B900] px-4 py-3 text-sm font-semibold text-[#00B900] transition-colors hover:bg-[#F2FFF2]"
-                >
-                  เปิดแอป LINE Sticker Maker
-                </button>
-              </div>
-
-              {isMobile && isAndroid && isInLiffClient ? (
-                <p className="text-sm text-slate-600">
-                  บน Android ใน LINE ระบบจะเปิดเบราว์เซอร์ภายนอกให้ก่อน แล้วค่อยบันทึกรูปจากที่นั่น
-                </p>
-              ) : null}
-
-              {isMobile && shouldResumeSaveToPhotos ? (
-                <p className="text-sm text-slate-600">
-                  ตอนนี้เปิดในเบราว์เซอร์ภายนอกแล้ว กด Save to Photos อีกครั้งเพื่อแชร์หรือดาวน์โหลด PNG
-                </p>
-              ) : null}
-
-              {isMobile && !isAndroid && !supportsFileShare() ? (
-                <p className="text-sm text-slate-600">
-                  อุปกรณ์นี้ไม่รองรับ Save to Photos โดยตรง กรุณาใช้ Download ZIP แทน
-                </p>
-              ) : null}
-            </div>
-            {finalPackExported && extraPickSlots.length > 0 ? (
-              <div className="mt-6 border-t border-slate-200 pt-5">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-semibold text-slate-900">Extra Vault</h3>
-                    <p className="text-sm text-slate-600">
-                      เลือกเพิ่มได้สูงสุด 16 รูป จากทั้งหมด {extraPickSlots.length} รูป
-                    </p>
-                  </div>
-                  <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
-                    {selectedExtraIds.length}/16 selected
-                  </span>
-                </div>
-
-                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {extraPickSlots.map((slot) => (
-                    <button
-                      type="button"
-                      key={slot.id}
-                      onClick={() => toggleExtraSelection(slot.id)}
-                      disabled={isExtraExporting || extraPackPaid}
-                      aria-pressed={selectedExtraIds.includes(slot.id)}
-                      className={`relative overflow-hidden rounded-2xl border p-[3px] ${
-                        selectedExtraIds.includes(slot.id) ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200 hover:border-emerald-400'
-                      } disabled:cursor-not-allowed disabled:opacity-70`}
-                    >
-                      {slot.url ? (
-                        <img
-                          src={slot.url}
-                          alt={`Extra sticker ${slot.replacedFromSlot != null ? slot.replacedFromSlot + 1 : ''}`}
-                          className="aspect-square w-full rounded-xl bg-white object-contain"
-                        />
-                      ) : (
-                        <div className="flex aspect-square w-full items-center justify-center rounded-xl bg-slate-100 text-center text-sm font-medium text-slate-500">
-                          Extra unavailable
-                        </div>
-                      )}
-                      <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
-                        {slot.replacedFromSlot != null ? `Slot ${slot.replacedFromSlot + 1}` : 'Extra'}
-                      </span>
-                      {selectedExtraIds.includes(slot.id) ? (
-                        <span className="absolute bottom-2 right-2 rounded-full bg-emerald-500/90 px-2 py-1 text-[11px] font-semibold text-white shadow">
-                          Selected
-                        </span>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mt-4 space-y-2">
-                  {!extraPackPaid ? (
-                    <button
-                      type="button"
-                      onClick={handleBuyExtraPack}
-                      disabled={selectedExtraIds.length === 0 || isCreatingPayment === 'extra_pack_99'}
-                      className="focus-ring min-h-11 w-full rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-400"
-                    >
-                      {isCreatingPayment === 'extra_pack_99' ? 'Opening payment...' : `Buy selected extras - 99 THB`}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleDownloadExtraVault}
-                      disabled={isExtraExporting}
-                      className="focus-ring min-h-11 w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-                    >
-                      {isExtraExporting ? 'Preparing extras...' : 'Download selected extras'}
-                    </button>
-                  )}
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedExtraIds(extraPickSlots.slice(0, 16).map((slot) => slot.id))}
-                      disabled={extraPackPaid || extraPickSlots.length === 0}
-                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Select first 16
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedExtraIds([])}
-                      disabled={extraPackPaid || selectedExtraIds.length === 0}
-                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      type="button"
-                      onClick={refreshExtraVault}
-                      disabled={isExtraVaultLoading}
-                      className="focus-ring rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-sky-300 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {isExtraVaultLoading ? 'Refreshing...' : 'Refresh'}
-                    </button>
-                  </div>
-                  <p className="text-sm text-slate-600">
-                    Extra pack แยกจาก final 16 และจะ export เฉพาะรูปที่เลือกไว้เท่านั้น
-                  </p>
-                </div>
-              </div>
-            ) : null}
-          </section>
-        )}
-
-      </main>
-      {isPromptGuideOpen ? (
-        <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center" role="presentation">
-          <button
-            type="button"
-            className="absolute inset-0 bg-slate-950/45 backdrop-blur-[2px]"
-            onClick={closePromptGuide}
-            aria-label="Close prompt guide"
-          />
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="prompt-guide-title"
-            className="relative w-full max-w-md overflow-hidden rounded-[2rem] bg-white p-5 shadow-2xl ring-1 ring-slate-200"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-sky-500">Prompt Guide</p>
-                <h2 id="prompt-guide-title" className="mt-1 text-xl font-black tracking-tight text-slate-900">
-                  เขียน prompt ให้ตัดภาพง่ายขึ้น
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={closePromptGuide}
-                className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition-colors hover:bg-slate-200 hover:text-slate-800"
-                aria-label="Close prompt guide"
-              >
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-                  <path d="M6 6l12 12" />
-                  <path d="M18 6L6 18" />
-                </svg>
-              </button>
-            </div>
-
-            <p className="mt-3 text-sm leading-6 text-slate-600">
-              บอกไอเดียได้เต็มที่ แต่เลี่ยงการสั่ง layout หรือพื้นหลัง เพื่อให้ระบบลบฉากหลังได้สะอาดขึ้น
-            </p>
-
-            <div className="mt-4 grid gap-3">
-              <div className="rounded-2xl bg-emerald-50 p-3 ring-1 ring-emerald-100">
-                <p className="text-sm font-black text-emerald-800">ควรใส่</p>
-                <p className="mt-1 text-sm leading-6 text-emerald-900/80">
-                  ธีม, อารมณ์, props, caption สั้น ๆ และบอกให้ตัวละครเด่นชัด
-                </p>
-              </div>
-              <div className="rounded-2xl bg-rose-50 p-3 ring-1 ring-rose-100">
-                <p className="text-sm font-black text-rose-800">ควรเลี่ยง</p>
-                <p className="mt-1 text-sm leading-6 text-rose-900/80">
-                  กรอบ, ตาราง, comic panel, พื้นหลังขาว, กล่องข้อความ, แถบสีหลัง caption
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-100">
-              <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Example</p>
-              <p className="mt-2 text-sm leading-6 text-slate-700">{PROMPT_GUIDE_EXAMPLE}</p>
-            </div>
-
-            <div className="mt-5 grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={handleUsePromptExample}
-                className="focus-ring min-h-11 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-slate-800"
-              >
-                ใช้ตัวอย่างนี้
-              </button>
-              <button
-                type="button"
-                onClick={closePromptGuide}
-                className="focus-ring min-h-11 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50"
-              >
-                เข้าใจแล้ว
-              </button>
-            </div>
-          </section>
-        </div>
+    <div className="min-h-screen bg-background font-sans text-on-background selection:bg-primary selection:text-white">
+      {currentView !== 'checkout' ? (
+        <Header
+          avatarSrc={profile?.pictureUrl}
+          attemptLabel={attemptLabel}
+          notificationCount={notificationCount}
+        />
       ) : null}
-    </PageLayout>
+
+      <main className="max-w-xl mx-auto pb-12 overflow-x-hidden">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={currentView}
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.3, ease: 'easeInOut' }}
+          >
+            {renderView()}
+          </motion.div>
+        </AnimatePresence>
+      </main>
+
+      <AnimatePresence>
+        {currentView !== 'checkout' && isGenerationLocked && !finalPackPaid && !dismissedLimit ? (
+          <LimitModal
+            cooldownLabel={cooldownLabel}
+            onUnlock={() => setCheckoutProduct('final_pack_199')}
+            onWait={() => setDismissedLimit(true)}
+            isOpeningPayment={isCreatingPayment === 'final_pack_199'}
+          />
+        ) : null}
+      </AnimatePresence>
+    </div>
   );
 };
 

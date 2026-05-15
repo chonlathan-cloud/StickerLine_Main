@@ -11,8 +11,8 @@ const AuthLoading: React.FC = () => {
   const isOnline = useOnlineStatus();
   return (
     <PageLayout isOnline={isOnline}>
-      <main className="mx-auto flex w-full max-w-md flex-col gap-4 px-4 pb-8 pt-6 sm:max-w-xl">
-        <section className="rounded-[2.5rem] border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">
+      <main className="mx-auto flex w-full max-w-md flex-col gap-4 px-6 pb-8 pt-6 sm:max-w-xl">
+        <section className="rounded-[32px] border-2 border-border-light-purple bg-white p-6 text-sm font-bold text-on-surface-variant shadow-sm">
           Preparing LINE login...
         </section>
       </main>

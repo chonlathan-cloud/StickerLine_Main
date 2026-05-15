@@ -8,7 +8,7 @@ interface PageLayoutProps {
 
 export const PageLayout: React.FC<PageLayoutProps> = ({ isOnline, children }) => {
   return (
-    <div className="min-h-dvh bg-[#f8fafc] text-slate-900">
+    <div className="min-h-screen bg-background font-sans text-on-background selection:bg-primary selection:text-white">
       <AppHeader isOnline={isOnline} />
       {children}
     </div>
