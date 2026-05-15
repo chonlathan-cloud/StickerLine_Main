@@ -249,6 +249,14 @@ export async function getExtraVaultDownloadUrl(userId: string, selectedExtraIds:
   return data;
 }
 
+export async function finalizeExtraVaultExport(userId: string) {
+  const { data } = await API.post<{
+    status: string;
+    generation_state: GenerationState;
+  }>('/api/v1/jobs/current/extra-vault/finalize-export', { user_id: userId });
+  return data;
+}
+
 export async function resetCurrentStickers(userId: string) {
   const { data } = await API.post<{ status: string }>('/api/v1/jobs/reset', { user_id: userId });
   return data;
@@ -272,6 +280,20 @@ export async function getCurrentStickersDownloadUrl(userId: string) {
 export async function downloadCurrentStickerForShare(userId: string, index: number) {
   const { data } = await API.get<Blob>(
     `/api/v1/jobs/current/share-file?user_id=${encodeURIComponent(userId)}&index=${index}`,
+    {
+      responseType: 'blob',
+      headers: {
+        Accept: 'image/png',
+        'Cache-Control': 'no-store',
+      },
+    },
+  );
+  return data;
+}
+
+export async function downloadExtraVaultStickerForShare(userId: string, extraId: string) {
+  const { data } = await API.get<Blob>(
+    `/api/v1/jobs/current/extra-vault/share-file?user_id=${encodeURIComponent(userId)}&extra_id=${encodeURIComponent(extraId)}`,
     {
       responseType: 'blob',
       headers: {

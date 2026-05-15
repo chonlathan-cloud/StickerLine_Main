@@ -22,11 +22,14 @@ import {
 import {
   ExtraVaultItemResponse,
   GenerationState,
+  GenerationWarning,
   PaymentProductId,
   StickerSlotResponse,
   checkJobStatus,
   createPayment,
   downloadCurrentStickerForShare,
+  downloadExtraVaultStickerForShare,
+  finalizeExtraVaultExport,
   finalizeCurrentStickerExport,
   getCurrentExtraVault,
   getCurrentStickers,
@@ -74,6 +77,24 @@ const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
 const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
 const PROMPT_GUIDE_EXAMPLE =
   'A cute office cat sticker set with tired, stressed, rushed, confused, happy moods, laptop, documents, tiny Thai chat captions, clear character, transparent background';
+const PROMPT_CHIP_GROUPS = [
+  {
+    label: 'Mood',
+    chips: ['Happy', 'Tired', 'Angry', 'Confused', 'Love'],
+  },
+  {
+    label: 'Scene',
+    chips: ['Cyberpunk City', 'Fairy Forest', 'Office', 'Cafe', 'Space'],
+  },
+  {
+    label: 'Props',
+    chips: ['Laptop', 'Coffee', 'Money', 'Phone', 'Documents'],
+  },
+  {
+    label: 'Caption',
+    chips: ['Thai chat captions', 'No text', 'Funny short text'],
+  },
+] as const;
 
 const TEMPLATE_IMAGES = {
   MASCOT_LOGIN: '/assets/template/mascot-login.png',
@@ -106,6 +127,9 @@ const buildSaveToPhotosBatchId = () => {
 const buildStickerPngFileName = (index: number, batchId: string) =>
   `sticker-${batchId}-${String(index + 1).padStart(2, '0')}.png`;
 
+const buildExtraPngFileName = (index: number, batchId: string) =>
+  `extra-sticker-${batchId}-${String(index + 1).padStart(2, '0')}.png`;
+
 const formatCountdown = (value?: string | null) => {
   if (!value) return null;
   const target = new Date(value).getTime();
@@ -135,6 +159,17 @@ const supportsFileShare = () =>
   typeof navigator !== 'undefined'
   && typeof navigator.share === 'function'
   && typeof File !== 'undefined';
+
+const canUseNativeFileShare = () => {
+  if (!isMobileDevice() || !supportsFileShare()) return false;
+  if (typeof navigator.canShare !== 'function') return true;
+  try {
+    const probeFile = new File(['probe'], 'sticker-probe.png', { type: 'image/png' });
+    return navigator.canShare({ files: [probeFile] });
+  } catch {
+    return false;
+  }
+};
 
 const shouldResumeSaveToPhotosInExternalBrowser = () => {
   const params = new URLSearchParams(window.location.search);
@@ -236,11 +271,15 @@ const GeneratorView = ({
   loadingSubtext,
   simulatedProgress,
   generateLabel,
+  hasGenerated,
   helperText,
   onUploadClick,
   onImageUpload,
   onStyleChange,
   onPromptChange,
+  onPromptChip,
+  onUsePromptExample,
+  onClearPrompt,
   onGenerate,
   fileInputRef,
 }: {
@@ -251,11 +290,15 @@ const GeneratorView = ({
   loadingSubtext: string;
   simulatedProgress: number;
   generateLabel: string;
+  hasGenerated: boolean;
   helperText?: string | null;
   onUploadClick: () => void;
   onImageUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onStyleChange: (style: StickerStyle) => void;
   onPromptChange: (prompt: string) => void;
+  onPromptChip: (chip: string) => void;
+  onUsePromptExample: () => void;
+  onClearPrompt: () => void;
   onGenerate: () => void;
   fileInputRef: React.RefObject<HTMLInputElement>;
 }) => (
@@ -311,6 +354,23 @@ const GeneratorView = ({
     <section>
       <div className="flex items-center justify-between gap-3 mb-4">
         <h3 className="text-lg font-bold">Describe Details</h3>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={onUsePromptExample}
+            className="px-3 py-1.5 bg-primary/5 rounded-full text-[11px] font-bold text-primary hover:bg-primary/10 transition-colors"
+          >
+            Use example
+          </button>
+          <button
+            type="button"
+            onClick={onClearPrompt}
+            disabled={!config.extraPrompt}
+            className="px-3 py-1.5 bg-surface-container-high rounded-full text-[11px] font-bold text-on-surface-variant hover:bg-primary-container/10 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Clear
+          </button>
+        </div>
       </div>
       <div className="bg-surface-container rounded-2xl p-4 border-2 border-border-light-purple min-h-[100px]">
         <textarea
@@ -321,23 +381,48 @@ const GeneratorView = ({
           onChange={(e) => onPromptChange(e.target.value)}
         />
       </div>
-      <div className="flex flex-wrap gap-2 mt-4">
-        {['Cyberpunk City', 'Fairy Forest', 'Rock Star'].map((tag) => (
-          <button
-            type="button"
-            key={tag}
-            onClick={() => onPromptChange(config.extraPrompt ? `${config.extraPrompt}, ${tag}` : tag)}
-            className="px-4 py-1.5 bg-surface-container-high rounded-full text-xs font-bold text-on-surface-variant cursor-pointer hover:bg-primary-container/10 transition-colors"
-          >
-            ✨ {tag}
-          </button>
+      <div className="mt-4 space-y-3">
+        {PROMPT_CHIP_GROUPS.map((group) => (
+          <div key={group.label}>
+            <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-outline">
+              {group.label}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {group.chips.map((tag) => {
+                const selected = config.extraPrompt
+                  .split(',')
+                  .map((part) => part.trim().toLowerCase())
+                  .includes(tag.toLowerCase());
+                return (
+                  <button
+                    type="button"
+                    key={tag}
+                    onClick={() => onPromptChip(tag)}
+                    disabled={selected}
+                    className={`px-4 py-1.5 rounded-full text-xs font-bold cursor-pointer transition-colors disabled:cursor-default ${
+                      selected
+                        ? 'bg-secondary-container text-on-secondary-container'
+                        : 'bg-surface-container-high text-on-surface-variant hover:bg-primary-container/10'
+                    }`}
+                  >
+                    ✨ {tag}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         ))}
+        {hasGenerated ? (
+          <p className="rounded-2xl bg-primary/5 px-4 py-3 text-xs font-bold leading-5 text-primary">
+            Tip: update details here, then regenerate only the unlocked stickers below.
+          </p>
+        ) : null}
       </div>
     </section>
 
-    <Button className="w-full text-lg mt-4" onClick={onGenerate} disabled={loading || !canGenerate}>
+    <Button className="w-full text-lg mt-4" onClick={onGenerate} disabled={loading || !canGenerate || hasGenerated}>
       {loading ? <RefreshIcon className="animate-spin" /> : <SparklesIcon />}
-      {generateLabel}
+      {loading ? generateLabel : hasGenerated ? 'Edit prompt, then regenerate below' : generateLabel}
     </Button>
     {helperText ? <p className="text-sm text-on-surface-variant text-center">{helperText}</p> : null}
   </div>
@@ -383,6 +468,54 @@ const LimitModal = ({
   </div>
 );
 
+const AttemptWarningModal = ({
+  warning,
+  onClose,
+  onUnlock,
+}: {
+  warning: GenerationWarning;
+  onClose: () => void;
+  onUnlock: () => void;
+}) => {
+  const isStrong = warning.level === 'strong';
+  const title = isStrong ? 'เหลืออีกไม่กี่ครั้ง' : 'ใกล้ครบโควต้าทดลองแล้ว';
+  const accent = isStrong ? 'bg-error-container text-on-error-container' : 'bg-primary-container/10 text-primary';
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
+      <motion.div
+        initial={{ scale: 0.92, opacity: 0, y: 12 }}
+        animate={{ scale: 1, opacity: 1, y: 0 }}
+        exit={{ scale: 0.92, opacity: 0, y: 12 }}
+        className="bg-white rounded-[32px] p-7 w-full max-w-sm text-center shadow-2xl"
+      >
+        <div className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6 ${accent}`}>
+          {isStrong ? <NotificationIcon className="w-9 h-9" /> : <SparklesIcon className="w-9 h-9" />}
+        </div>
+        <h3 className="text-2xl font-extrabold mb-3">{title}</h3>
+        <p className="text-on-surface-variant text-sm leading-6 mb-5">{warning.message}</p>
+
+        <div className="mb-7 rounded-2xl border-2 border-border-light-purple bg-surface-container px-5 py-4">
+          <p className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-outline">Remaining Trial</p>
+          <p className="mt-1 text-3xl font-black text-primary tabular-nums">{warning.remaining}</p>
+        </div>
+
+        <div className="space-y-3">
+          {isStrong ? (
+            <Button className="w-full" onClick={onUnlock}>
+              <PayIcon />
+              Unlock & Save 199 THB
+            </Button>
+          ) : null}
+          <Button variant={isStrong ? 'secondary' : 'primary'} className="w-full" onClick={onClose}>
+            เข้าใจแล้ว
+          </Button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
 const GridView = ({
   stickerSlots,
   selectedCount,
@@ -425,7 +558,7 @@ const GridView = ({
 
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {stickerSlots.map((slot, index) => {
-        const isSelected = slot.locked;
+        const isKept = slot.locked;
         return (
           <motion.button
             type="button"
@@ -433,11 +566,24 @@ const GridView = ({
             whileTap={{ scale: 0.95 }}
             onClick={() => onToggle(index)}
             disabled={loading || finalPackPaid}
-            className={`relative aspect-square rounded-[24px] overflow-hidden transition-all duration-300 cursor-pointer disabled:cursor-not-allowed ${isSelected ? 'border-ai-gradient shadow-lg scale-100' : 'border-2 border-border-light-purple opacity-60 grayscale-[40%] scale-[0.98]'}`}
+            className={`relative aspect-square rounded-[24px] overflow-hidden transition-all duration-300 cursor-pointer disabled:cursor-not-allowed ${
+              isKept
+                ? 'border-ai-gradient shadow-lg scale-100'
+                : 'border-2 border-primary/50 shadow-sm scale-100'
+            }`}
           >
-            <img src={slot.url} alt={`Sticker ${index + 1}`} className={`w-full h-full object-contain bg-white ${!isSelected && 'blur-[1px]'}`} />
-            <div className={`absolute top-2 right-2 w-8 h-8 rounded-full shadow-md flex items-center justify-center transition-all ${isSelected ? 'bg-white' : 'bg-white/40'}`}>
-              {isSelected ? <CheckIcon className="text-secondary-container w-6 h-6" /> : <LockIcon className="text-on-surface-variant w-4 h-4" />}
+            <img
+              src={slot.url}
+              alt={`Sticker ${index + 1}`}
+              className={`w-full h-full object-contain bg-white transition-opacity duration-300 ${isKept ? 'opacity-82' : 'opacity-100'}`}
+            />
+            {isKept ? (
+              <div className="absolute inset-0 bg-primary/14" aria-hidden="true" />
+            ) : null}
+            <div className={`absolute top-2 right-2 w-8 h-8 rounded-full shadow-md flex items-center justify-center transition-all ${
+              isKept ? 'bg-white text-primary' : 'bg-secondary-container text-on-secondary-container'
+            }`}>
+              {isKept ? <LockIcon className="w-4 h-4" /> : <RefreshIcon className="w-5 h-5" />}
             </div>
           </motion.button>
         );
@@ -459,6 +605,118 @@ const GridView = ({
     </div>
   </div>
 );
+
+const WorkspaceView = ({
+  config,
+  loading,
+  canGenerate,
+  loadingHeadline,
+  loadingSubtext,
+  simulatedProgress,
+  generateLabel,
+  helperText,
+  error,
+  stickerSlots,
+  selectedCount,
+  finalPackPaid,
+  fileInputRef,
+  gridRef,
+  onUploadClick,
+  onImageUpload,
+  onStyleChange,
+  onPromptChange,
+  onPromptChip,
+  onUsePromptExample,
+  onClearPrompt,
+  onGenerate,
+  onToggleSticker,
+  onRegenerate,
+  onContinue,
+  onSelectAll,
+  onClearAll,
+}: {
+  config: StickerSheetConfig;
+  loading: boolean;
+  canGenerate: boolean;
+  loadingHeadline: string;
+  loadingSubtext: string;
+  simulatedProgress: number;
+  generateLabel: string;
+  helperText?: string | null;
+  error?: string | null;
+  stickerSlots: StickerSlot[];
+  selectedCount: number;
+  finalPackPaid: boolean;
+  fileInputRef: React.RefObject<HTMLInputElement>;
+  gridRef: React.RefObject<HTMLDivElement>;
+  onUploadClick: () => void;
+  onImageUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onStyleChange: (style: StickerStyle) => void;
+  onPromptChange: (prompt: string) => void;
+  onPromptChip: (chip: string) => void;
+  onUsePromptExample: () => void;
+  onClearPrompt: () => void;
+  onGenerate: () => void;
+  onToggleSticker: (index: number) => void;
+  onRegenerate: () => void;
+  onContinue: () => void;
+  onSelectAll: () => void;
+  onClearAll: () => void;
+}) => {
+  const hasGrid = stickerSlots.length > 0;
+
+  return (
+    <div>
+      <GeneratorView
+        config={config}
+        loading={loading}
+        canGenerate={canGenerate}
+        loadingHeadline={loadingHeadline}
+        loadingSubtext={loadingSubtext}
+        simulatedProgress={simulatedProgress}
+        generateLabel={generateLabel}
+        hasGenerated={hasGrid}
+        helperText={hasGrid ? 'Keep this setup visible. Edit style or details above, then regenerate only the unselected stickers below.' : helperText || error}
+        onUploadClick={onUploadClick}
+        onImageUpload={onImageUpload}
+        onStyleChange={onStyleChange}
+        onPromptChange={onPromptChange}
+        onPromptChip={onPromptChip}
+        onUsePromptExample={onUsePromptExample}
+        onClearPrompt={onClearPrompt}
+        onGenerate={onGenerate}
+        fileInputRef={fileInputRef}
+      />
+
+      <AnimatePresence initial={false}>
+        {hasGrid ? (
+          <motion.div
+            ref={gridRef}
+            initial={{ opacity: 0, y: 24 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            transition={{ duration: 0.28, ease: 'easeOut' }}
+            className="border-t border-outline-variant/30"
+          >
+            <GridView
+              stickerSlots={stickerSlots}
+              selectedCount={selectedCount}
+              finalPackPaid={finalPackPaid}
+              loading={loading}
+              helperText={helperText}
+              error={error}
+              onToggle={onToggleSticker}
+              onRegenerate={onRegenerate}
+              onContinue={onContinue}
+              onSelectAll={onSelectAll}
+              onClearAll={onClearAll}
+            />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+};
 
 const CheckoutView = ({
   productId,
@@ -556,6 +814,9 @@ const SuccessView = ({
   onPayExtra,
   onDownloadExtras,
   onDownloadFinal,
+  finalDownloadLabel,
+  extraDownloadLabel,
+  isFinalSaving,
   onOpenStickerMaker,
 }: {
   stickerSlots: StickerSlot[];
@@ -569,6 +830,9 @@ const SuccessView = ({
   onPayExtra: () => void;
   onDownloadExtras: () => void;
   onDownloadFinal: () => void;
+  finalDownloadLabel: string;
+  extraDownloadLabel: string;
+  isFinalSaving: boolean;
   onOpenStickerMaker: () => void;
 }) => {
   const [showVault, setShowVault] = useState(false);
@@ -602,7 +866,10 @@ const SuccessView = ({
           <div className="aspect-square bg-surface-container flex items-center justify-center rounded-xl font-bold text-primary">+13</div>
         </div>
         <div className="flex flex-col gap-3">
-          <Button variant="secondary" className="w-full h-12" onClick={onDownloadFinal}><DownloadIcon /> Download ZIP</Button>
+          <Button variant="secondary" className="w-full h-12" onClick={onDownloadFinal} disabled={isFinalSaving}>
+            {isFinalSaving ? <RefreshIcon className="animate-spin" /> : <DownloadIcon />}
+            {finalDownloadLabel}
+          </Button>
           <Button variant="line" className="w-full h-12 text-sm" onClick={onOpenStickerMaker}><LineIcon /> Open LINE Sticker Maker</Button>
         </div>
       </div>
@@ -664,8 +931,8 @@ const SuccessView = ({
               disabled={isBusy || selectedCount === 0}
               className="px-10"
             >
-              {isBusy ? <RefreshIcon className="animate-spin" /> : <PaymentsIcon />}
-              {extraPackPaid ? 'Download' : 'Payment 99 THB'}
+              {isBusy ? <RefreshIcon className="animate-spin" /> : extraPackPaid ? <DownloadIcon /> : <PaymentsIcon />}
+              {extraPackPaid ? extraDownloadLabel : 'Payment 99 THB'}
             </Button>
           </div>
         </div>
@@ -712,6 +979,7 @@ const GeneratePage: React.FC = () => {
   const isOnline = useOnlineStatus();
   const { profile } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   const [config, setConfig] = useState<StickerSheetConfig>({
     base64Image: '',
@@ -734,6 +1002,7 @@ const GeneratePage: React.FC = () => {
   const [isSavingFinal, setIsSavingFinal] = useState(false);
   const [isExtraExporting, setIsExtraExporting] = useState(false);
   const [dismissedLimit, setDismissedLimit] = useState(false);
+  const [warningPopup, setWarningPopup] = useState<GenerationWarning | null>(null);
   const [clockTick, setClockTick] = useState(0);
 
   const hydrateCurrentGeneration = (data: CurrentGenerationPayload) => {
@@ -861,17 +1130,33 @@ const GeneratePage: React.FC = () => {
   const helperText = generationState?.warning?.message
     || (isGenerationLocked ? `Reset in ${cooldownLabel ?? '24h'} or unlock the final pack.` : null);
 
-  const currentView: 'generator' | 'grid' | 'checkout' | 'success' = checkoutProduct
+  const currentView: 'workspace' | 'checkout' | 'success' = checkoutProduct
     ? 'checkout'
     : finalPackExported
       ? 'success'
-      : stickerSlots.length
-        ? (finalPackPaid ? 'checkout' : 'grid')
-        : 'generator';
+      : finalPackPaid
+        ? 'checkout'
+        : 'workspace';
 
   const activeCheckoutProduct = checkoutProduct ?? (finalPackPaid && !finalPackExported ? 'final_pack_199' : null);
 
   const openImagePicker = () => fileInputRef.current?.click();
+
+  const appendPromptChip = (chip: string) => {
+    setConfig((previous) => {
+      const parts = previous.extraPrompt
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean);
+      const alreadyExists = parts.some((part) => part.toLowerCase() === chip.toLowerCase());
+      if (alreadyExists) return previous;
+      return {
+        ...previous,
+        extraPrompt: [...parts, chip].join(', '),
+      };
+    });
+    setError(null);
+  };
 
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -890,6 +1175,7 @@ const GeneratePage: React.FC = () => {
       setSelectedExtraIds([]);
       setGenerationState(null);
       setCheckoutProduct(null);
+      setWarningPopup(null);
       setError(null);
       if (profile?.userId) {
         resetCurrentStickers(profile.userId).catch(() => null);
@@ -924,6 +1210,7 @@ const GeneratePage: React.FC = () => {
     setProcessingStep('analyzing');
     setError(null);
     setDismissedLimit(false);
+    setWarningPopup(null);
 
     const pollUntilComplete = async (jobId: string) => {
       const maxAttempts = 180;
@@ -959,7 +1246,18 @@ const GeneratePage: React.FC = () => {
       setProcessingStep('removing');
       const currentData = await getCurrentStickers(profile.userId);
       hydrateCurrentGeneration(currentData);
+      const nextWarning = currentData.generation_state?.warning;
+      if (nextWarning && nextWarning.level !== 'limit_reached') {
+        setWarningPopup(nextWarning);
+      }
       setProcessingStep('complete');
+      window.setTimeout(() => {
+        const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        gridRef.current?.scrollIntoView({
+          behavior: prefersReducedMotion ? 'auto' : 'smooth',
+          block: 'start',
+        });
+      }, 250);
     } catch (err: any) {
       const backendDetail = err?.response?.data?.detail;
       if (backendDetail?.generation_state) {
@@ -1030,22 +1328,16 @@ const GeneratePage: React.FC = () => {
     setCheckoutProduct(null);
   };
 
-  const handleSaveFinalPack = async () => {
+  const saveFinalPackToDevice = async (finalizeAfterSave: boolean) => {
     if (!profile?.userId) return;
-    if (!finalPackPaid) {
-      setCheckoutProduct('final_pack_199');
-      return;
-    }
 
     if (isAndroidDevice() && isInLiffClient()) {
       window.location.assign(buildExternalBrowserSaveToPhotosUrl());
       return;
     }
 
-    try {
-      setIsSavingFinal(true);
-      setError(null);
-      if (isMobileDevice() && supportsFileShare()) {
+    if (canUseNativeFileShare()) {
+      try {
         const batchId = buildSaveToPhotosBatchId();
         const files = await Promise.all(
           Array.from({ length: stickerSlots.length || DEFAULT_STICKER_COUNT }, async (_, index) => {
@@ -1056,14 +1348,31 @@ const GeneratePage: React.FC = () => {
         const canShare = typeof navigator.canShare === 'function' ? navigator.canShare({ files }) : true;
         if (canShare) {
           await navigator.share({ files, title: 'Mia-U-Sticker Final Pack' });
-          await finalizeFinalPackExport();
+          if (finalizeAfterSave) await finalizeFinalPackExport();
           return;
         }
+      } catch (shareError) {
+        console.warn('Native file share failed; falling back to ZIP download.', shareError);
+        setError('Native save was unavailable, downloading ZIP instead.');
       }
+    }
 
-      const { url } = await getCurrentStickersDownloadUrl(profile.userId);
-      openDownloadUrl(url);
-      await finalizeFinalPackExport();
+    const { url } = await getCurrentStickersDownloadUrl(profile.userId);
+    openDownloadUrl(url);
+    if (finalizeAfterSave) await finalizeFinalPackExport();
+  };
+
+  const handleSaveFinalPack = async () => {
+    if (!profile?.userId) return;
+    if (!finalPackPaid) {
+      setCheckoutProduct('final_pack_199');
+      return;
+    }
+
+    try {
+      setIsSavingFinal(true);
+      setError(null);
+      await saveFinalPackToDevice(true);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       if (detail?.generation_state) setGenerationState(detail.generation_state);
@@ -1081,10 +1390,13 @@ const GeneratePage: React.FC = () => {
   const handleDownloadFinalAgain = async () => {
     if (!profile?.userId) return;
     try {
-      const { url } = await getCurrentStickersDownloadUrl(profile.userId);
-      openDownloadUrl(url);
+      setIsSavingFinal(true);
+      setError(null);
+      await saveFinalPackToDevice(false);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Could not download final pack.');
+    } finally {
+      setIsSavingFinal(false);
     }
   };
 
@@ -1125,6 +1437,38 @@ const GeneratePage: React.FC = () => {
     await beginPayment('extra_pack_99', selectedExtraIds);
   };
 
+  const saveExtraVaultToDevice = async (idsToExport: string[]) => {
+    if (!profile?.userId) return;
+
+    if (canUseNativeFileShare()) {
+      try {
+        const batchId = buildSaveToPhotosBatchId();
+        const files = await Promise.all(
+          idsToExport.map(async (extraId, index) => {
+            const blob = await downloadExtraVaultStickerForShare(profile.userId, extraId);
+            return new File([blob], buildExtraPngFileName(index, batchId), { type: 'image/png' });
+          }),
+        );
+        const canShare = typeof navigator.canShare === 'function' ? navigator.canShare({ files }) : true;
+        if (canShare) {
+          await navigator.share({ files, title: 'Mia-U-Sticker Extra Vault' });
+          const finalized = await finalizeExtraVaultExport(profile.userId);
+          setGenerationState(finalized.generation_state);
+          return;
+        }
+      } catch (shareError) {
+        console.warn('Native extra file share failed; falling back to ZIP download.', shareError);
+        setError('Native save was unavailable, downloading ZIP instead.');
+      }
+    }
+
+    const { url, generation_state } = await getExtraVaultDownloadUrl(profile.userId, idsToExport);
+    setGenerationState(generation_state);
+    openDownloadUrl(url);
+    const finalized = await finalizeExtraVaultExport(profile.userId);
+    setGenerationState(finalized.generation_state);
+  };
+
   const handleDownloadExtras = async () => {
     if (!profile?.userId) return;
     const idsToExport = generationState?.extra_pack_selected_ids?.length
@@ -1136,9 +1480,8 @@ const GeneratePage: React.FC = () => {
     }
     try {
       setIsExtraExporting(true);
-      const { url, generation_state } = await getExtraVaultDownloadUrl(profile.userId, idsToExport);
-      setGenerationState(generation_state);
-      openDownloadUrl(url);
+      setError(null);
+      await saveExtraVaultToDevice(idsToExport);
       await refreshExtraVault().catch(() => null);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
@@ -1188,31 +1531,16 @@ const GeneratePage: React.FC = () => {
           onPayExtra={handleBuyExtraPack}
           onDownloadExtras={handleDownloadExtras}
           onDownloadFinal={handleDownloadFinalAgain}
+          finalDownloadLabel={isMobileDevice() ? 'Save to Photos' : 'Download ZIP'}
+          extraDownloadLabel={isMobileDevice() ? 'Save to Photos' : 'Download ZIP'}
+          isFinalSaving={isSavingFinal}
           onOpenStickerMaker={handleOpenStickerMaker}
         />
       );
     }
 
-    if (currentView === 'grid') {
-      return (
-        <GridView
-          stickerSlots={stickerSlots}
-          selectedCount={lockedCount}
-          finalPackPaid={finalPackPaid}
-          loading={loading}
-          helperText={helperText}
-          error={error}
-          onToggle={toggleStickerLock}
-          onRegenerate={generateSheet}
-          onContinue={() => setCheckoutProduct('final_pack_199')}
-          onSelectAll={() => setStickerSlots((previous) => previous.map((slot) => ({ ...slot, locked: true })))}
-          onClearAll={() => setStickerSlots((previous) => previous.map((slot) => ({ ...slot, locked: false })))}
-        />
-      );
-    }
-
     return (
-      <GeneratorView
+      <WorkspaceView
         config={config}
         loading={loading}
         canGenerate={canGenerate}
@@ -1220,12 +1548,25 @@ const GeneratePage: React.FC = () => {
         loadingSubtext={loadingSubtext}
         simulatedProgress={simulatedProgress}
         generateLabel={loading ? loadingHeadline : 'Generate'}
-        helperText={helperText || error}
+        helperText={helperText}
+        error={error}
+        stickerSlots={stickerSlots}
+        selectedCount={lockedCount}
+        finalPackPaid={finalPackPaid}
+        gridRef={gridRef}
         onUploadClick={openImagePicker}
         onImageUpload={handleImageUpload}
         onStyleChange={(style) => setConfig((previous) => ({ ...previous, style }))}
         onPromptChange={(prompt) => setConfig((previous) => ({ ...previous, extraPrompt: prompt }))}
+        onPromptChip={(chip) => appendPromptChip(chip)}
+        onUsePromptExample={() => setConfig((previous) => ({ ...previous, extraPrompt: PROMPT_GUIDE_EXAMPLE }))}
+        onClearPrompt={() => setConfig((previous) => ({ ...previous, extraPrompt: '' }))}
         onGenerate={generateSheet}
+        onToggleSticker={toggleStickerLock}
+        onRegenerate={generateSheet}
+        onContinue={() => setCheckoutProduct('final_pack_199')}
+        onSelectAll={() => setStickerSlots((previous) => previous.map((slot) => ({ ...slot, locked: true })))}
+        onClearAll={() => setStickerSlots((previous) => previous.map((slot) => ({ ...slot, locked: false })))}
         fileInputRef={fileInputRef}
       />
     );
@@ -1262,6 +1603,19 @@ const GeneratePage: React.FC = () => {
             onUnlock={() => setCheckoutProduct('final_pack_199')}
             onWait={() => setDismissedLimit(true)}
             isOpeningPayment={isCreatingPayment === 'final_pack_199'}
+          />
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {currentView === 'workspace' && !isGenerationLocked && warningPopup ? (
+          <AttemptWarningModal
+            warning={warningPopup}
+            onClose={() => setWarningPopup(null)}
+            onUnlock={() => {
+              setWarningPopup(null);
+              setCheckoutProduct('final_pack_199');
+            }}
           />
         ) : null}
       </AnimatePresence>

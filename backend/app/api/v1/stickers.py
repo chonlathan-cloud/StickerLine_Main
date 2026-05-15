@@ -822,12 +822,78 @@ async def get_current_extra_vault_download_url(
         response_disposition=f"attachment; filename={filename}",
         response_type="application/zip",
     )
-    generation_state = await user_service.mark_extra_pack_exported(request.user_id)
 
     return {
         "status": "ok",
         "url": url,
         "selected_extra_ids": [item["id"] for item in selected_items],
+        "generation_state": state,
+    }
+
+@router.get("/current/extra-vault/share-file")
+async def get_current_extra_vault_share_file(
+    user_id: str = Query(..., min_length=3),
+    extra_id: str = Query(..., min_length=1),
+    user_service: UserService = Depends(get_user_service),
+    storage_client: StorageClient = Depends(get_storage_client),
+    token_profile: dict = Depends(get_line_profile),
+):
+    """
+    Stream one paid Extra Vault PNG for mobile share/save flows.
+    """
+    assert_user_match(token_profile["line_id"], user_id)
+    try:
+        vault_state = await user_service.require_extra_pack_paid(user_id)
+    except ExtraPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("extra_pack_99", exc.state),
+        ) from exc
+
+    state = vault_state["generation_state"]
+    paid_selected_ids = state.get("extra_pack_selected_ids") or []
+    if paid_selected_ids and extra_id not in paid_selected_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Extra sticker was not selected for this pack.")
+
+    selected_items = _select_extra_vault_items(vault_state.get("extra_vault") or [], [extra_id])
+    item = selected_items[0]
+    blob_name = item.get("blob_name")
+    if not blob_name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Extra sticker blob is unavailable.")
+
+    blob = storage_client.bucket.blob(blob_name)
+    try:
+        sticker_bytes = blob.download_as_bytes()
+    except Exception as exc:
+        logger.error("Failed to download extra sticker blob %s for share: %s", blob_name, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to prepare extra sticker file.") from exc
+
+    headers = {
+        "Content-Disposition": f'inline; filename="extra-sticker-{extra_id}.png"',
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(BytesIO(sticker_bytes), media_type="image/png", headers=headers)
+
+@router.post("/current/extra-vault/finalize-export", status_code=status.HTTP_200_OK)
+async def finalize_current_extra_vault_export(
+    request: FinalizeExportRequest,
+    user_service: UserService = Depends(get_user_service),
+    token_profile: dict = Depends(get_line_profile),
+):
+    """
+    Mark Extra Vault export as completed after frontend save/share/download flow finishes.
+    """
+    assert_user_match(token_profile["line_id"], request.user_id)
+    try:
+        generation_state = await user_service.mark_extra_pack_exported(request.user_id)
+    except ExtraPackPaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=_payment_required_detail("extra_pack_99", exc.state),
+        ) from exc
+
+    return {
+        "status": "ok",
         "generation_state": generation_state,
     }
 
