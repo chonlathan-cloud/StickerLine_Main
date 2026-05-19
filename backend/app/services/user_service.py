@@ -30,9 +30,7 @@ class ExtraPackPaymentRequiredError(Exception):
 
 class UserService:
     def __init__(self):
-        print("🟡 [DEBUG] กำลังเรียก get_db()...")
         self.db = get_db()
-        print("🟢 [DEBUG] เรียก get_db() สำเร็จแล้ว!")
         self.users_collection = self.db.collection('users')
 
     def _now(self) -> datetime:

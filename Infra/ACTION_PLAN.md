@@ -483,14 +483,23 @@ Alert channel:
 
 Initial alerts:
 
-- High: DLQ message count > 0.
-- High: oldest unacked Pub/Sub message age > 5 minutes.
+- High: DLQ message count > 0. Implemented in `Infra/bootstrap_infra.sh`
+  behind `CREATE_ALERT_POLICIES=1`.
+- High: oldest unacked Pub/Sub message age > 5 minutes. Implemented in
+  `Infra/bootstrap_infra.sh` behind `CREATE_ALERT_POLICIES=1`.
+- Medium: worker 5xx/failure spike. Implemented in `Infra/bootstrap_infra.sh`
+  behind `CREATE_ALERT_POLICIES=1`.
 - High: undelivered messages > 10 for 5 minutes.
 - Medium: gateway 5xx rate > 1%.
 - Medium: gateway p99 latency > 1 second.
-- Medium: worker 5xx/failure spike.
 - Medium: worker memory utilization > 85% for 5 minutes.
 - Medium: Vertex/Gemini error spike.
+
+Create first-wave alert policies:
+
+```bash
+CREATE_ALERT_POLICIES=1 ./Infra/bootstrap_infra.sh
+```
 
 Initial SLO targets:
 

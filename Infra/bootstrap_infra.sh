@@ -29,6 +29,11 @@ PUBSUB_MESSAGE_RETENTION_DURATION="${PUBSUB_MESSAGE_RETENTION_DURATION:-7d}"
 
 ALERT_EMAIL="${ALERT_EMAIL:-chonlathan@manee-son.com}"
 CREATE_MONITORING_CHANNEL="${CREATE_MONITORING_CHANNEL:-0}"
+CREATE_ALERT_POLICIES="${CREATE_ALERT_POLICIES:-0}"
+ALERT_POLICY_PREFIX="${ALERT_POLICY_PREFIX:-StickerLine}"
+ALERT_DLQ_UNDELIVERED_THRESHOLD="${ALERT_DLQ_UNDELIVERED_THRESHOLD:-0}"
+ALERT_OLDEST_UNACKED_AGE_SECONDS="${ALERT_OLDEST_UNACKED_AGE_SECONDS:-300}"
+ALERT_WORKER_5XX_RATE_THRESHOLD="${ALERT_WORKER_5XX_RATE_THRESHOLD:-0}"
 GRANT_GEMINI_TO_BE="${GRANT_GEMINI_TO_BE:-0}"
 
 LINE_CHANNEL_SECRET_NAME="${LINE_CHANNEL_SECRET_NAME:-line-channel-secret}"
@@ -207,8 +212,10 @@ ensure_artifact_repo() {
 }
 
 ensure_monitoring_channel() {
-  if [[ "${CREATE_MONITORING_CHANNEL}" != "1" ]]; then
-    echo "SKIP monitoring notification channel. Set CREATE_MONITORING_CHANNEL=1 to create an email channel for ${ALERT_EMAIL}."
+  MONITORING_NOTIFICATION_CHANNEL=""
+
+  if [[ "${CREATE_MONITORING_CHANNEL}" != "1" && "${CREATE_ALERT_POLICIES}" != "1" ]]; then
+    echo "SKIP monitoring notification channel. Set CREATE_MONITORING_CHANNEL=1 or CREATE_ALERT_POLICIES=1 to create an email channel for ${ALERT_EMAIL}."
     return
   fi
 
@@ -220,16 +227,107 @@ ensure_monitoring_channel() {
 
   if [[ -n "${existing_channel}" ]]; then
     echo "OK monitoring email channel exists: ${existing_channel}"
+    MONITORING_NOTIFICATION_CHANNEL="${existing_channel}"
     return
   fi
 
   echo "==> Create monitoring email channel for ${ALERT_EMAIL}"
-  gcloud alpha monitoring channels create \
+  MONITORING_NOTIFICATION_CHANNEL="$(gcloud alpha monitoring channels create \
     --project "${PROJECT_ID}" \
     --display-name "StickerLine alerts ${ALERT_EMAIL}" \
     --type email \
     --channel-labels "email_address=${ALERT_EMAIL}" \
+    --format "value(name)" \
+    --quiet)"
+}
+
+policy_exists() {
+  local display_name="$1"
+  gcloud alpha monitoring policies list \
+    --project "${PROJECT_ID}" \
+    --filter "displayName=\"${display_name}\"" \
+    --format "value(name)" 2>/dev/null | grep -q .
+}
+
+create_threshold_alert_policy_if_missing() {
+  local display_name="$1"
+  local condition_display_name="$2"
+  local metric_filter="$3"
+  local threshold_value="$4"
+  local duration="$5"
+  local aligner="$6"
+  local reducer="$7"
+  local documentation="$8"
+
+  if policy_exists "${display_name}"; then
+    echo "OK alert policy exists: ${display_name}"
+    return
+  fi
+
+  local aggregation
+  aggregation="{\"alignmentPeriod\":\"60s\",\"perSeriesAligner\":\"${aligner}\",\"crossSeriesReducer\":\"${reducer}\",\"groupByFields\":[]}"
+
+  local create_args=(
+    --project "${PROJECT_ID}"
+    --display-name "${display_name}"
+    --condition-display-name "${condition_display_name}"
+    --condition-filter "${metric_filter}"
+    --if "> ${threshold_value}"
+    --duration "${duration}"
+    --trigger-count 1
+    --combiner OR
+    --aggregation "${aggregation}"
+    --documentation "${documentation}"
     --quiet
+  )
+
+  if [[ -n "${MONITORING_NOTIFICATION_CHANNEL:-}" ]]; then
+    create_args+=(--notification-channels "${MONITORING_NOTIFICATION_CHANNEL}")
+  fi
+
+  echo "==> Create alert policy: ${display_name}"
+  gcloud alpha monitoring policies create "${create_args[@]}" >/dev/null
+}
+
+ensure_alert_policies() {
+  if [[ "${CREATE_ALERT_POLICIES}" != "1" ]]; then
+    echo "SKIP alert policies. Set CREATE_ALERT_POLICIES=1 to create initial Monitoring alerts."
+    return
+  fi
+
+  local dlq_policy="${ALERT_POLICY_PREFIX} DLQ has messages"
+  local oldest_policy="${ALERT_POLICY_PREFIX} generation queue oldest unacked age high"
+  local worker_5xx_policy="${ALERT_POLICY_PREFIX} worker 5xx responses"
+
+  create_threshold_alert_policy_if_missing \
+    "${dlq_policy}" \
+    "DLQ undelivered messages > ${ALERT_DLQ_UNDELIVERED_THRESHOLD}" \
+    "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${STICKER_GENERATION_DLQ_SUB}\" AND metric.type = \"pubsub.googleapis.com/subscription/num_undelivered_messages\"" \
+    "${ALERT_DLQ_UNDELIVERED_THRESHOLD}" \
+    "60s" \
+    "ALIGN_MAX" \
+    "REDUCE_MAX" \
+    "DLQ subscription has undelivered messages. Inspect ${STICKER_GENERATION_DLQ_SUB}, worker logs, and failed jobs before acknowledging or replaying messages."
+
+  create_threshold_alert_policy_if_missing \
+    "${oldest_policy}" \
+    "Oldest unacked generation message age > ${ALERT_OLDEST_UNACKED_AGE_SECONDS}s" \
+    "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"${STICKER_GENERATION_SUBSCRIPTION}\" AND metric.type = \"pubsub.googleapis.com/subscription/oldest_unacked_message_age\"" \
+    "${ALERT_OLDEST_UNACKED_AGE_SECONDS}" \
+    "300s" \
+    "ALIGN_MAX" \
+    "REDUCE_MAX" \
+    "Generation queue oldest unacked message age is high. Check worker scaling, AI latency, failures, and Pub/Sub backlog."
+
+  create_threshold_alert_policy_if_missing \
+    "${worker_5xx_policy}" \
+    "Worker 5xx response rate > ${ALERT_WORKER_5XX_RATE_THRESHOLD}" \
+    "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${WORKER_SERVICE}\" AND resource.labels.location = \"${REGION}\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\"" \
+    "${ALERT_WORKER_5XX_RATE_THRESHOLD}" \
+    "60s" \
+    "ALIGN_RATE" \
+    "REDUCE_SUM" \
+    "Cloud Run worker is returning 5xx responses. Check stickerline-worker logs and Pub/Sub retry/DLQ state."
 }
 
 require_command gcloud
@@ -312,6 +410,7 @@ else
 fi
 
 ensure_monitoring_channel
+ensure_alert_policies
 
 cat <<EOF
 
