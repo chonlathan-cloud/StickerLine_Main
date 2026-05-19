@@ -30,6 +30,36 @@ def _get_jobs_collection():
     return get_db().collection("jobs")
 
 
+def _normalize_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _processing_age_seconds(job_data: dict, now: datetime) -> float | None:
+    started_at = _normalize_datetime(job_data.get("processing_started_at"))
+    if started_at is None:
+        started_at = _normalize_datetime(job_data.get("worker_last_claimed_at"))
+    if started_at is None:
+        started_at = _normalize_datetime(job_data.get("updated_at"))
+    if started_at is None:
+        return None
+    return max(0.0, (now - started_at).total_seconds())
+
+
+def _is_stale_processing_job(job_data: dict, now: datetime) -> tuple[bool, float | None]:
+    threshold = max(0, int(settings.WORKER_STALE_PROCESSING_SECONDS))
+    if threshold == 0:
+        return False, None
+
+    age_seconds = _processing_age_seconds(job_data, now)
+    if age_seconds is None:
+        return False, None
+    return age_seconds >= threshold, age_seconds
+
+
 def _parse_delivery_attempt(value: Any) -> int | None:
     if value is None:
         return None
@@ -111,14 +141,29 @@ async def _claim_generation_job(
 
         job_data = snapshot.to_dict() or {}
         current_status = job_data.get("status")
-        if current_status != "queued":
+        now = _utc_now()
+        claim_status = "claimed"
+        stale_age_seconds = None
+
+        if current_status == "processing":
+            is_stale, stale_age_seconds = _is_stale_processing_job(job_data, now)
+            if not is_stale:
+                return {
+                    "claim_status": "retry_later",
+                    "current_status": current_status,
+                    "job_data": job_data,
+                    "reason": "already_processing",
+                    "processing_age_seconds": stale_age_seconds,
+                }
+            claim_status = "stale_reclaimed"
+        elif current_status != "queued":
             return {
                 "claim_status": "ignored",
                 "current_status": current_status,
                 "job_data": job_data,
+                "reason": "non_claimable_status",
             }
 
-        now = _utc_now()
         update_data = {
             "status": "processing",
             "processing_started_at": now,
@@ -126,7 +171,13 @@ async def _claim_generation_job(
             "worker_attempt": firestore.Increment(1),
             "worker_last_claimed_at": now,
             "worker_claim_source": "pubsub_push",
+            "worker_claim_status": claim_status,
         }
+        if claim_status == "stale_reclaimed":
+            update_data["stale_reclaimed_at"] = now
+            update_data["stale_reclaim_count"] = firestore.Increment(1)
+            if stale_age_seconds is not None:
+                update_data["stale_processing_age_seconds"] = int(stale_age_seconds)
         if message_id:
             update_data["pubsub_message_id"] = message_id
         if delivery_attempt is not None:
@@ -138,10 +189,10 @@ async def _claim_generation_job(
         job_data.update({
             key: value
             for key, value in update_data.items()
-            if key != "worker_attempt"
+            if key not in {"worker_attempt", "stale_reclaim_count"}
         })
         return {
-            "claim_status": "claimed",
+            "claim_status": claim_status,
             "current_status": "processing",
             "job_data": job_data,
         }
@@ -154,11 +205,10 @@ async def _mark_job_failed(job_id: str, error: str, details: str | None = None) 
     update_data = {
         "status": "failed",
         "error": error,
+        "last_error": details or error,
         "failed_at": failed_at,
         "updated_at": failed_at,
     }
-    if details:
-        update_data["last_error"] = details
     await _get_jobs_collection().document(job_id).update(update_data)
 
 
@@ -213,14 +263,39 @@ async def handle_pubsub_push(envelope: dict = Body(...)):
     if claim_status == "missing":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found.")
 
+    if claim_status == "retry_later":
+        logger.info(
+            "Pub/Sub delivery for job %s is already processing; asking Pub/Sub to retry later",
+            job_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "status": "retry_later",
+                "job_id": job_id,
+                "current_status": current_status,
+                "message_id": message_id,
+                "reason": claim.get("reason"),
+                "processing_age_seconds": claim.get("processing_age_seconds"),
+            },
+        )
+
     if claim_status == "ignored":
-        logger.info("Ignoring Pub/Sub delivery for job %s with status %s", job_id, current_status)
+        logger.info(
+            "Ignoring Pub/Sub delivery for job %s with status %s: %s",
+            job_id,
+            current_status,
+            claim.get("reason"),
+        )
         return {
             "status": "ignored",
             "job_id": job_id,
             "current_status": current_status,
             "message_id": message_id,
+            "reason": claim.get("reason"),
         }
+    if claim_status == "stale_reclaimed":
+        logger.warning("Reclaimed stale processing job %s from Pub/Sub delivery %s", job_id, message_id)
 
     job_data = claim["job_data"] or {}
     try:

@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from google.cloud import firestore
+from app.core.config import settings
 from app.utils.firestore import get_db
 from app.models.user import UserCreate, UserInDB
 
@@ -38,6 +39,9 @@ class UserService:
 
     def _new_cycle_id(self) -> str:
         return uuid4().hex
+
+    def _transaction(self):
+        return self.db.transaction(max_attempts=max(5, settings.FIRESTORE_TRANSACTION_MAX_ATTEMPTS))
 
     def _build_warning(self, generation_count: int, generation_limit: int = GENERATION_LIMIT) -> dict | None:
         remaining = max(generation_limit - generation_count, 0)
@@ -249,7 +253,7 @@ class UserService:
         The 20th accepted attempt is allowed, then generation locks for the cycle.
         Later attempts are blocked until payment or cooldown reset.
         """
-        transaction = self.db.transaction()
+        transaction = self._transaction()
         user_ref = self.users_collection.document(user_id)
 
         @firestore.async_transactional
@@ -341,7 +345,7 @@ class UserService:
         extra_picks_unlocked: bool = False,
     ) -> None:
         user_ref = self.users_collection.document(user_id)
-        transaction = self.db.transaction()
+        transaction = self._transaction()
 
         @firestore.async_transactional
         async def atomic_set(transaction, user_ref):
@@ -381,6 +385,50 @@ class UserService:
         await user_ref.update(update_data)
         return self._build_generation_state(update_data)
 
+    async def refund_generation_attempt(self, user_id: str, cycle_id: str | None = None) -> dict:
+        user_ref = self.users_collection.document(user_id)
+        transaction = self._transaction()
+
+        @firestore.async_transactional
+        async def atomic_refund(transaction, user_ref):
+            snapshot = await user_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError(f"User {user_id} not found")
+
+            data = self._with_cycle_defaults(snapshot.to_dict() or {})
+            if cycle_id and data.get("current_cycle_id") != cycle_id:
+                return {
+                    "refunded": False,
+                    "generation_state": self._build_generation_state(data),
+                }
+
+            generation_count = int(data.get("generation_count") or 0)
+            if generation_count <= 0:
+                return {
+                    "refunded": False,
+                    "generation_state": self._build_generation_state(data),
+                }
+
+            now = self._now()
+            generation_limit = int(data.get("generation_limit") or GENERATION_LIMIT)
+            next_count = max(0, generation_count - 1)
+            update_data = {
+                "generation_count": next_count,
+                "updated_at": now,
+            }
+            if next_count < generation_limit and not data.get("final_pack_paid_at"):
+                update_data["generation_locked_at"] = None
+                update_data["generation_cooldown_until"] = None
+
+            data.update(update_data)
+            transaction.update(user_ref, update_data)
+            return {
+                "refunded": True,
+                "generation_state": self._build_generation_state(data),
+            }
+
+        return await atomic_refund(transaction, user_ref)
+
     async def require_final_pack_paid(self, user_id: str) -> dict:
         state = await self.get_cycle_state(user_id)
         if not state.get("final_pack_paid"):
@@ -388,7 +436,7 @@ class UserService:
         return state
 
     async def mark_final_pack_exported(self, user_id: str) -> dict:
-        transaction = self.db.transaction()
+        transaction = self._transaction()
         user_ref = self.users_collection.document(user_id)
 
         @firestore.async_transactional
@@ -460,7 +508,7 @@ class UserService:
         return vault_state
 
     async def mark_extra_pack_exported(self, user_id: str) -> dict:
-        transaction = self.db.transaction()
+        transaction = self._transaction()
         user_ref = self.users_collection.document(user_id)
 
         @firestore.async_transactional

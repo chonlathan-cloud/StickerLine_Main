@@ -1,6 +1,7 @@
 import uuid
 import logging
 import asyncio
+import random
 from datetime import datetime, timezone
 from io import BytesIO
 import zipfile
@@ -23,6 +24,7 @@ from app.utils.firestore import get_db
 logger = logging.getLogger(__name__)
 router = APIRouter()
 VALID_GENERATION_DISPATCH_MODES = {"local_async", "pubsub"}
+FIRESTORE_TRANSACTION_CONTENTION_TEXT = "failed to commit transaction"
 
 def get_user_service():
     return UserService()
@@ -79,6 +81,42 @@ def _get_generation_dispatch_mode() -> str:
             detail=f"Invalid GENERATION_DISPATCH_MODE: {settings.GENERATION_DISPATCH_MODE}",
         )
     return mode
+
+def _is_firestore_transaction_contention(exc: Exception) -> bool:
+    return FIRESTORE_TRANSACTION_CONTENTION_TEXT in str(exc).lower()
+
+async def _prepare_generation_attempt_with_retry(user_service: UserService, user_id: str) -> dict:
+    retries = max(0, settings.GENERATION_ATTEMPT_RESERVATION_RETRIES)
+    base_delay = max(0.05, settings.GENERATION_ATTEMPT_RESERVATION_RETRY_BASE_DELAY)
+    for attempt in range(retries + 1):
+        try:
+            return await user_service.prepare_generation_attempt(user_id)
+        except GenerationLimitReachedError:
+            raise
+        except Exception as exc:
+            if not _is_firestore_transaction_contention(exc):
+                raise
+            if attempt >= retries:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "error_code": "generation_attempt_conflict",
+                        "message": "Generation attempt reservation is busy. Please retry.",
+                    },
+                ) from exc
+
+            delay = base_delay * (2 ** attempt)
+            delay += random.uniform(0, delay * 0.25)
+            logger.warning(
+                "Generation attempt reservation conflicted for %s; retrying in %.2fs (attempt %d/%d)",
+                user_id,
+                delay,
+                attempt + 1,
+                retries,
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable")
 
 def _extract_slot_index(slot: dict) -> int:
     try:
@@ -172,7 +210,7 @@ async def generate_stickers(
         storage_client = get_storage_client()
 
     try:
-        generation_state = await user_service.prepare_generation_attempt(user_id)
+        generation_state = await _prepare_generation_attempt_with_retry(user_service, user_id)
     except GenerationLimitReachedError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -182,6 +220,8 @@ async def generate_stickers(
                 "generation_state": exc.state,
             },
         ) from exc
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         
@@ -717,6 +757,9 @@ async def get_job_status(
             "status": "failed",
             "job_id": job_id,
             "error": data.get("error", "Unknown error"),
+            "error_code": data.get("error_code"),
+            "retry_after_seconds": data.get("retry_after_seconds"),
+            "attempt_refunded": bool(data.get("attempt_refunded", False)),
             "generation_state": data.get("generation_state"),
         }
         if data.get("grid_blob"):

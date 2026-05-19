@@ -141,6 +141,9 @@ export async function checkJobStatus(jobId: string) {
     generation_state?: GenerationState;
     extra_vault_item_count?: number;
     error?: string;
+    error_code?: string;
+    retry_after_seconds?: number;
+    attempt_refunded?: boolean;
   }>(
     `/api/v1/jobs/${jobId}`,
   );

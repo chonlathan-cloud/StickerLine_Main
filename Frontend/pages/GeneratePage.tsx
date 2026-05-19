@@ -75,6 +75,8 @@ const DEFAULT_STICKER_COUNT = 16;
 const ALLOWED_STICKER_COUNTS = new Set([15, 16]);
 const SAVE_TO_PHOTOS_PARAM = 'saveToPhotos';
 const SAVE_TO_PHOTOS_PARAM_VALUE = '1';
+const AI_CAPACITY_ERROR_CODE = 'ai_capacity_exhausted';
+const AI_CAPACITY_ERROR_MESSAGE = 'ระบบหนาแน่น กรุณารอสักครู่แล้วลองใหม่';
 const PROMPT_GUIDE_EXAMPLE =
   'A cute office cat sticker set with tired, stressed, rushed, confused, happy moods, laptop, documents, tiny Thai chat captions, clear character, transparent background';
 const PROMPT_CHIP_GROUPS = [
@@ -141,6 +143,14 @@ const formatCountdown = (value?: string | null) => {
   const minutes = totalMinutes % 60;
   if (hours <= 0) return `${minutes} min`;
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+};
+
+const formatRetryCountdown = (seconds: number) => {
+  const totalSeconds = Math.max(0, Math.ceil(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (minutes <= 0) return `${remainingSeconds}s`;
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
 const openDownloadUrl = (url: string) => {
@@ -596,6 +606,7 @@ const GridView = ({
   selectedCount,
   finalPackPaid,
   loading,
+  retryBlocked,
   helperText,
   error,
   onToggle,
@@ -608,6 +619,7 @@ const GridView = ({
   selectedCount: number;
   finalPackPaid: boolean;
   loading: boolean;
+  retryBlocked: boolean;
   helperText?: string | null;
   error?: string | null;
   onToggle: (index: number) => void;
@@ -669,7 +681,7 @@ const GridView = ({
     {error ? <p className="mt-3 rounded-2xl bg-error-container px-4 py-3 text-sm font-bold text-on-error-container">{error}</p> : null}
 
     <div className="mt-12 flex flex-col gap-4 sticky bottom-6">
-      <Button variant="secondary" className="w-full" onClick={onRegenerate} disabled={loading || finalPackPaid}>
+      <Button variant="secondary" className="w-full" onClick={onRegenerate} disabled={loading || finalPackPaid || retryBlocked}>
         {loading ? <RefreshIcon className="animate-spin" /> : <RefreshIcon />}
         Regenerate Unselected
       </Button>
@@ -685,6 +697,7 @@ const WorkspaceView = ({
   config,
   loading,
   canGenerate,
+  retryBlocked,
   loadingHeadline,
   loadingSubtext,
   simulatedProgress,
@@ -713,6 +726,7 @@ const WorkspaceView = ({
   config: StickerSheetConfig;
   loading: boolean;
   canGenerate: boolean;
+  retryBlocked: boolean;
   loadingHeadline: string;
   loadingSubtext: string;
   simulatedProgress: number;
@@ -746,6 +760,7 @@ const WorkspaceView = ({
         config={config}
         loading={loading}
         canGenerate={canGenerate}
+        retryBlocked={isCapacityRetryActive}
         loadingHeadline={loadingHeadline}
         loadingSubtext={loadingSubtext}
         simulatedProgress={simulatedProgress}
@@ -778,6 +793,7 @@ const WorkspaceView = ({
               selectedCount={selectedCount}
               finalPackPaid={finalPackPaid}
               loading={loading}
+              retryBlocked={retryBlocked}
               helperText={helperText}
               error={error}
               onToggle={onToggleSticker}
@@ -1156,6 +1172,8 @@ const GeneratePage: React.FC = () => {
   const [dismissedLimit, setDismissedLimit] = useState(false);
   const [warningPopup, setWarningPopup] = useState<GenerationWarning | null>(null);
   const [clockTick, setClockTick] = useState(0);
+  const [capacityRetryUntil, setCapacityRetryUntil] = useState<number | null>(null);
+  const [capacityRetryTick, setCapacityRetryTick] = useState(0);
 
   const hydrateCurrentGeneration = (data: CurrentGenerationPayload) => {
     const now = Date.now();
@@ -1205,6 +1223,18 @@ const GeneratePage: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (!capacityRetryUntil) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() >= capacityRetryUntil) {
+        setCapacityRetryUntil(null);
+        setError((previous) => (previous === AI_CAPACITY_ERROR_MESSAGE ? null : previous));
+      }
+      setCapacityRetryTick((tick) => tick + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [capacityRetryUntil]);
+
+  useEffect(() => {
     if (!loading) {
       setSimulatedStickerCount(1);
       return;
@@ -1242,9 +1272,17 @@ const GeneratePage: React.FC = () => {
     () => formatCountdown(generationState?.generation_cooldown_until),
     [clockTick, generationState?.generation_cooldown_until],
   );
+  const retryClockNow = Date.now() + capacityRetryTick * 0;
+  const capacityRetryRemainingSeconds = capacityRetryUntil
+    ? Math.max(0, Math.ceil((capacityRetryUntil - retryClockNow) / 1000))
+    : 0;
+  const isCapacityRetryActive = capacityRetryRemainingSeconds > 0;
+  const capacityRetryMessage = isCapacityRetryActive
+    ? `${AI_CAPACITY_ERROR_MESSAGE} (${formatRetryCountdown(capacityRetryRemainingSeconds)})`
+    : null;
   const lockedCount = stickerSlots.filter((slot) => slot.locked).length;
   const unlockedCount = stickerSlots.length ? stickerSlots.length - lockedCount : DEFAULT_STICKER_COUNT;
-  const canGenerate = Boolean(config.base64Image) && !isGenerationLocked && !(finalPackPaid && !finalPackExported);
+  const canGenerate = Boolean(config.base64Image) && !isGenerationLocked && !isCapacityRetryActive && !(finalPackPaid && !finalPackExported);
 
   const loadingHeadline =
     processingStep === 'analyzing'
@@ -1274,6 +1312,8 @@ const GeneratePage: React.FC = () => {
           : processingStep === 'complete'
             ? 100
             : 0;
+
+  const displayError = capacityRetryMessage || error;
 
   const helperText = formatUserFacingWarning(generationState?.warning)
     || (isGenerationLocked ? `Reset in ${cooldownLabel ?? '24h'} or unlock the final pack.` : null);
@@ -1325,12 +1365,22 @@ const GeneratePage: React.FC = () => {
       setCheckoutProduct(null);
       setWarningPopup(null);
       setError(null);
+      setCapacityRetryUntil(null);
       if (profile?.userId) {
         resetCurrentStickers(profile.userId).catch(() => null);
       }
     };
     reader.readAsDataURL(file);
   };
+
+  const applyCapacityRetry = (retryAfterSeconds?: number | null) => {
+    const retrySeconds = Math.max(30, Number(retryAfterSeconds || 300));
+    setCapacityRetryUntil(Date.now() + retrySeconds * 1000);
+    setCapacityRetryTick((tick) => tick + 1);
+    setError(AI_CAPACITY_ERROR_MESSAGE);
+  };
+
+  const extractBackendDetail = (err: any) => err?.backendDetail || err?.response?.data?.detail;
 
   const generateSheet = async () => {
     if (!isOnline) {
@@ -1343,6 +1393,10 @@ const GeneratePage: React.FC = () => {
     }
     if (!config.base64Image) {
       setError('Please upload a source image first.');
+      return;
+    }
+    if (isCapacityRetryActive) {
+      setError(AI_CAPACITY_ERROR_MESSAGE);
       return;
     }
 
@@ -1369,7 +1423,9 @@ const GeneratePage: React.FC = () => {
           return statusResp;
         }
         if (statusResp.status === 'failed') {
-          throw new Error(statusResp.error || 'Generation failed.');
+          const failure = new Error(statusResp.error || 'Generation failed.');
+          (failure as any).backendDetail = statusResp;
+          throw failure;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 2000));
       }
@@ -1394,6 +1450,7 @@ const GeneratePage: React.FC = () => {
       setProcessingStep('removing');
       const currentData = await getCurrentStickers(profile.userId);
       hydrateCurrentGeneration(currentData);
+      setCapacityRetryUntil(null);
       const nextWarning = currentData.generation_state?.warning;
       if (nextWarning && nextWarning.level !== 'limit_reached') {
         setWarningPopup(nextWarning);
@@ -1407,19 +1464,23 @@ const GeneratePage: React.FC = () => {
         });
       }, 250);
     } catch (err: any) {
-      const backendDetail = err?.response?.data?.detail;
+      const backendDetail = extractBackendDetail(err);
       if (backendDetail?.generation_state) {
         setGenerationState(backendDetail.generation_state);
       }
       if (backendDetail?.generation_state?.is_generation_locked) {
         setDismissedLimit(false);
       }
+      if (backendDetail?.error_code === AI_CAPACITY_ERROR_CODE) {
+        applyCapacityRetry(backendDetail.retry_after_seconds);
+        return;
+      }
       const message = backendDetail?.generation_state?.warning?.message
         || (backendDetail?.error_code === 'generation_limit_reached'
           ? 'Limit reached. Unlock 199 THB to save this sticker pack.'
           : typeof backendDetail === 'string'
             ? backendDetail
-            : err?.message || 'Error connecting to server.');
+            : backendDetail?.message || err?.message || 'Error connecting to server.');
       setError(message);
     } finally {
       setLoading(false);
@@ -1743,7 +1804,7 @@ const GeneratePage: React.FC = () => {
         simulatedProgress={simulatedProgress}
         generateLabel={loading ? loadingHeadline : 'Generate'}
         helperText={helperText}
-        error={error}
+        error={displayError}
         stickerSlots={stickerSlots}
         selectedCount={lockedCount}
         finalPackPaid={finalPackPaid}

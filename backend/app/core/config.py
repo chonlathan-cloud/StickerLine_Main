@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     CORS_ALLOWED_ORIGINS: str = (
         "http://localhost:3000,"
         "http://localhost:3002,"
-        "http://192.168.15.190:3002,"
         "https://stickerline-fe-917214899974.asia-southeast1.run.app"
     )
     CORS_ALLOW_ORIGIN_REGEX: str | None = r"^https://stickerline-fe-[a-z0-9-]+\.a\.run\.app$"
@@ -45,10 +44,18 @@ class Settings(BaseSettings):
     GENERATION_COOLDOWN_SECONDS: int = 30
     GENERATION_MAX_RETRIES: int = 8
     GENERATION_RETRY_BASE_DELAY: float = 5.0
+    GENERATION_ATTEMPT_RESERVATION_RETRIES: int = 3
+    GENERATION_ATTEMPT_RESERVATION_RETRY_BASE_DELAY: float = 0.2
+    FIRESTORE_TRANSACTION_MAX_ATTEMPTS: int = 10
+    AI_PROVIDER_MAX_CONCURRENT_CALLS: int = 8
+    AI_PROVIDER_CAPACITY_LEASE_SECONDS: int = 660
+    AI_PROVIDER_CAPACITY_WAIT_TIMEOUT_SECONDS: float = 540.0
+    AI_PROVIDER_CAPACITY_POLL_SECONDS: float = 1.0
     PUBSUB_PROJECT_ID: str | None = None
     STICKER_GENERATION_TOPIC: str = "sticker-generation-jobs"
     PUBSUB_PUBLISH_TIMEOUT_SECONDS: float = 10.0
     ENABLE_PUBSUB_WORKER_ENDPOINT: bool = False
+    WORKER_STALE_PROCESSING_SECONDS: int = 660
 
     model_config = SettingsConfigDict(
         env_file=".env",

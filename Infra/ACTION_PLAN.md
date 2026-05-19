@@ -290,19 +290,33 @@ Recommended job state additions:
 - `worker_instance`
 - `pubsub_message_id`
 - `last_error`
+- `error_type`
+- `worker_claim_status`
+- `stale_reclaimed_at`
+- `stale_reclaim_count`
+- `stale_processing_age_seconds`
 
 Claim rule:
 
 - Process only if current status is `queued`.
-- If status is `processing`, `completed`, or `failed`, return `2xx` unless a
-  separate stale-processing recovery policy is implemented.
+- If status is `processing` and younger than `WORKER_STALE_PROCESSING_SECONDS`,
+  return retryable non-`2xx` (`409`) so Pub/Sub keeps redelivering instead of
+  acknowledging work that has not reached a terminal state.
+- If status is `processing` and older than `WORKER_STALE_PROCESSING_SECONDS`,
+  reclaim the job and process it again.
+- If status is `completed` or `failed`, return `2xx` and do not process again.
 - Increment `worker_attempt` when claiming.
 
-Future stale recovery:
+Stale recovery:
 
-- If status is `processing` and `processing_started_at` is older than a chosen
-  timeout, allow a new delivery to reclaim the job.
-- This should be added only after initial worker stability is proven.
+- Default threshold: `WORKER_STALE_PROCESSING_SECONDS=660`.
+- Reclaimed jobs write `worker_claim_status=stale_reclaimed`,
+  `stale_reclaimed_at`, `stale_reclaim_count`, and
+  `stale_processing_age_seconds`.
+- The threshold is intentionally higher than the 600 second Pub/Sub push ack
+  deadline by one retry backoff window to avoid reclaiming normal long-running
+  jobs too aggressively while still reclaiming before DLQ in normal retry
+  timing.
 
 ## Secret Manager Mapping
 
@@ -342,6 +356,14 @@ Non-secret environment variables:
 - `PUBSUB_PUBLISH_TIMEOUT_SECONDS=10`
 - `ENABLE_PUBSUB_WORKER_ENDPOINT=false` on `stickerline-be`
 - `ENABLE_PUBSUB_WORKER_ENDPOINT=true` on `stickerline-worker`
+- `WORKER_STALE_PROCESSING_SECONDS=660`
+- `FIRESTORE_TRANSACTION_MAX_ATTEMPTS=10`
+- `GENERATION_ATTEMPT_RESERVATION_RETRIES=3`
+- `GENERATION_ATTEMPT_RESERVATION_RETRY_BASE_DELAY=0.2`
+- `AI_PROVIDER_MAX_CONCURRENT_CALLS=8`
+- `AI_PROVIDER_CAPACITY_LEASE_SECONDS=660`
+- `AI_PROVIDER_CAPACITY_WAIT_TIMEOUT_SECONDS=540`
+- `AI_PROVIDER_CAPACITY_POLL_SECONDS=1`
 - Pub/Sub subscription names for infra scripts/worker code
 
 Implementation note:
@@ -602,6 +624,25 @@ Use p50/p95/p99 to decide whether:
 
 ### Phase 6: Load and Failure Testing
 
+- Harden worker idempotency:
+  - active duplicate deliveries return retryable `409`;
+  - stale `processing` jobs can be reclaimed after 660 seconds;
+  - terminal jobs are acknowledged with `2xx` and are not processed again.
+- Harden gateway burst handling:
+  - increase Firestore transaction attempts for user generation state;
+  - retry generation attempt reservation conflicts before returning `409`.
+- Add first-pass AI provider backpressure:
+  - use Firestore leases to cap concurrent Vertex/Gemini calls across the worker
+    fleet;
+  - default cap is `AI_PROVIDER_MAX_CONCURRENT_CALLS=8` until real quota data
+    supports a higher value.
+- Normalize AI capacity failures:
+  - worker marks failed capacity jobs with `error_code=ai_capacity_exhausted`
+    and `retry_after_seconds`;
+  - generation attempts are refunded when the failure is caused by AI provider
+    capacity/rate limits;
+  - frontend shows a localized retry countdown and blocks regenerate/generate
+    until the retry window ends.
 - Simulate generation bursts.
 - Verify queue depth and worker scaling.
 - Force worker failures and confirm retry/DLQ behavior.

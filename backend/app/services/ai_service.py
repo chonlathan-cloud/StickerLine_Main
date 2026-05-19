@@ -11,6 +11,7 @@ from google.api_core import exceptions as gax_exceptions
 from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
 
 from app.core.config import settings
+from app.services.ai_capacity_limiter import AIProviderCapacityError, AI_CAPACITY_USER_MESSAGE, ai_provider_capacity_limiter
 from app.utils.storage import StorageClient
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class AIService:
     )
     QUOTED_CAPTION_PATTERN = re.compile(r"[\"“”']([^\"“”'\n]{1,32})[\"“”']")
     GEMINI_PROVIDER_ALIASES = {"gemini_api", "gemini", "ai_studio", "genai"}
-    RATE_LIMIT_USER_MESSAGE = "ระบบหนาแน่น กรุณารอ 5 นาที แล้วลองใหม่"
+    RATE_LIMIT_USER_MESSAGE = AI_CAPACITY_USER_MESSAGE
 
     def __init__(self) -> None:
         self.provider = (settings.GENAI_PROVIDER or "vertex").strip().lower()
@@ -240,40 +241,41 @@ class AIService:
                 "Character should be positioned clearly in each grid cell."
             ).strip()
 
-            if self.provider in self.GEMINI_PROVIDER_ALIASES:
-                return await self._generate_with_gemini_api(
-                    image_uri=image_uri,
-                    prompt=full_prompt,
-                    max_retries=self.max_retries,
-                    provider_label="Gemini API",
-                )
+            async with ai_provider_capacity_limiter(provider=self.provider, model_id=self.model_id):
+                if self.provider in self.GEMINI_PROVIDER_ALIASES:
+                    return await self._generate_with_gemini_api(
+                        image_uri=image_uri,
+                        prompt=full_prompt,
+                        max_retries=self.max_retries,
+                        provider_label="Gemini API",
+                    )
 
-            try:
-                return await self._generate_with_vertex(
-                    image_uri=image_uri,
-                    prompt=full_prompt,
-                    max_retries=self.max_retries,
-                    provider_label="Vertex AI",
-                )
-            except Exception as e:
-                if not self._is_retryable_error(e):
-                    raise
-
-                if self.fallback_provider in self.GEMINI_PROVIDER_ALIASES and self.gemini_api_key:
-                    logger.warning("Vertex AI exhausted. Falling back to Gemini API.")
-                    try:
-                        return await self._generate_with_gemini_api(
-                            image_uri=image_uri,
-                            prompt=full_prompt,
-                            max_retries=self.fallback_max_retries,
-                            provider_label="Gemini API (fallback)",
-                        )
-                    except Exception as fallback_error:
-                        if self._is_retryable_error(fallback_error):
-                            raise RuntimeError(self.RATE_LIMIT_USER_MESSAGE) from fallback_error
+                try:
+                    return await self._generate_with_vertex(
+                        image_uri=image_uri,
+                        prompt=full_prompt,
+                        max_retries=self.max_retries,
+                        provider_label="Vertex AI",
+                    )
+                except Exception as e:
+                    if not self._is_retryable_error(e):
                         raise
 
-                raise RuntimeError(self.RATE_LIMIT_USER_MESSAGE) from e
+                    if self.fallback_provider in self.GEMINI_PROVIDER_ALIASES and self.gemini_api_key:
+                        logger.warning("Vertex AI exhausted. Falling back to Gemini API.")
+                        try:
+                            return await self._generate_with_gemini_api(
+                                image_uri=image_uri,
+                                prompt=full_prompt,
+                                max_retries=self.fallback_max_retries,
+                                provider_label="Gemini API (fallback)",
+                            )
+                        except Exception as fallback_error:
+                            if self._is_retryable_error(fallback_error):
+                                raise AIProviderCapacityError() from fallback_error
+                            raise
+
+                    raise AIProviderCapacityError() from e
         except Exception as e:
             logger.error(f"Error generating sticker grid: {e}")
             raise e

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from app.core.config import settings
 from app.models.sticker import StickerGenerateRequest
+from app.services.ai_capacity_limiter import AIProviderCapacityError
 from app.services.ai_service import AIService
 from app.services.image_service import ImageProcessor, UnsupportedStickerGridLayoutError
 from app.services.user_service import UserService
@@ -32,6 +33,15 @@ def _utc_now():
 
 def _get_jobs_collection():
     return get_db().collection("jobs")
+
+
+async def _get_job_cycle_id(job_id: str) -> str | None:
+    snapshot = await _get_jobs_collection().document(job_id).get()
+    if not snapshot.exists:
+        return None
+    data = snapshot.to_dict() or {}
+    cycle_id = data.get("cycle_id")
+    return cycle_id if isinstance(cycle_id, str) else None
 
 
 async def update_generation_job(job_id: str, data: dict) -> None:
@@ -321,11 +331,27 @@ async def process_generation_job(
 
     except Exception as e:
         logger.error("Sticker generation failed for %s. Error: %s", request.user_id, e)
+        failure_data = {
+            "status": "failed",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "last_error": str(e),
+            "failed_at": _utc_now(),
+        }
+        if isinstance(e, AIProviderCapacityError):
+            cycle_id = await _get_job_cycle_id(job_id)
+            try:
+                refund_result = await user_service.refund_generation_attempt(request.user_id, cycle_id)
+            except Exception:
+                logger.exception("Failed to refund generation attempt for capacity failure on job %s", job_id)
+                refund_result = {"refunded": False, "generation_state": None}
+            failure_data.update({
+                "error_code": e.error_code,
+                "retry_after_seconds": e.retry_after_seconds,
+                "attempt_refunded": bool(refund_result.get("refunded")),
+                "generation_state": refund_result.get("generation_state"),
+            })
         await update_generation_job(
             job_id,
-            {
-                "status": "failed",
-                "error": str(e),
-                "failed_at": _utc_now(),
-            },
+            failure_data,
         )
