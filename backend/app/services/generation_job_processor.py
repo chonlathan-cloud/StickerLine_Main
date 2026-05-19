@@ -60,13 +60,21 @@ async def process_generation_job(
     ai_service: AIService,
     image_processor: ImageProcessor,
     storage_client: StorageClient,
+    mark_queued: bool = True,
 ) -> None:
     try:
-        await update_generation_job(job_id, {"status": "queued"})
+        if mark_queued:
+            await update_generation_job(job_id, {"status": "queued"})
         await _apply_user_cooldown(request.user_id)
 
         async with GENERATION_SEMAPHORE:
-            await update_generation_job(job_id, {"status": "processing"})
+            await update_generation_job(
+                job_id,
+                {
+                    "status": "processing",
+                    "processing_started_at": _utc_now(),
+                },
+            )
             best_candidate: dict | None = None
             last_quality_warnings: list[dict] = []
 
@@ -307,9 +315,17 @@ async def process_generation_job(
                     "result_slots": persisted_slots,
                     "extra_vault_items": new_extra_vault_items,
                     "extra_vault_item_count": len(new_extra_vault_items),
+                    "completed_at": _utc_now(),
                 },
             )
 
     except Exception as e:
         logger.error("Sticker generation failed for %s. Error: %s", request.user_id, e)
-        await update_generation_job(job_id, {"status": "failed", "error": str(e)})
+        await update_generation_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": str(e),
+                "failed_at": _utc_now(),
+            },
+        )

@@ -195,6 +195,7 @@ async def generate_stickers(
         "status": "queued",
         "dispatch_mode": dispatch_mode,
         "sticker_count": None,
+        "request_payload": request.model_dump(),
         "generation_state": generation_state,
         "queued_at": now,
         "created_at": now,

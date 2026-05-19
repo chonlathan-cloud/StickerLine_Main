@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     PUBSUB_PROJECT_ID: str | None = None
     STICKER_GENERATION_TOPIC: str = "sticker-generation-jobs"
     PUBSUB_PUBLISH_TIMEOUT_SECONDS: float = 10.0
+    ENABLE_PUBSUB_WORKER_ENDPOINT: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

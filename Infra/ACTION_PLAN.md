@@ -326,6 +326,8 @@ Non-secret environment variables:
 - `PUBSUB_PROJECT_ID=skitkerline` optional; defaults to `PROJECT_ID`.
 - `STICKER_GENERATION_TOPIC=sticker-generation-jobs`
 - `PUBSUB_PUBLISH_TIMEOUT_SECONDS=10`
+- `ENABLE_PUBSUB_WORKER_ENDPOINT=false` on `stickerline-be`
+- `ENABLE_PUBSUB_WORKER_ENDPOINT=true` on `stickerline-worker`
 - Pub/Sub subscription names for infra scripts/worker code
 
 Implementation note:
@@ -518,6 +520,7 @@ Use p50/p95/p99 to decide whether:
 - Refactor `POST /api/v1/jobs/generate`:
   - reserve attempt;
   - create job with `queued_at`;
+  - persist `request_payload` so a separate worker can reconstruct the job;
   - if `GENERATION_DISPATCH_MODE=pubsub`, publish Pub/Sub message and persist
     `pubsub_message_id`/`published_at`;
   - if `GENERATION_DISPATCH_MODE=local_async`, keep `asyncio.create_task` as the
@@ -529,10 +532,10 @@ Use p50/p95/p99 to decide whether:
 
 - Reuse `backend/app/services/generation_job_processor.py` from the Phase 1
   checkpoint.
-- Create a worker FastAPI entrypoint.
-- Add `POST /pubsub/push`.
-- Decode Pub/Sub message data.
-- Claim queued jobs idempotently.
+- Create a worker FastAPI entrypoint through the shared FastAPI app.
+- Add `POST /pubsub/push`, gated by `ENABLE_PUBSUB_WORKER_ENDPOINT`.
+- Decode Pub/Sub message data and validate schema/user/cycle references.
+- Claim queued jobs idempotently with a Firestore transaction.
 - Run existing AI/image pipeline.
 - Write `completed` or `failed` state.
 - Return `2xx` only after terminal state.
