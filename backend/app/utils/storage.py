@@ -81,7 +81,10 @@ class StorageClient:
         """
         Refresh credentials and create IAM signer if needed (for Cloud Run).
         """
-        credentials, _ = google.auth.default()
+        credentials, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        self.client = storage.Client(project=settings.PROJECT_ID, credentials=credentials)
         request = Request()
         credentials.refresh(request)
 

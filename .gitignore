@@ -30,3 +30,7 @@ lerna-debug.log*
 # Temporary files
 backend/tmp/
 # comment
+
+# Local service account keys
+*.json
+skitkerline-b6ca02223361.json

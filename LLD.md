@@ -1,284 +1,706 @@
-# Low - Level Design : LLD
+# Low-Level Design (LLD)
 
-**Phase 4: Low-Level Design (LLD)** สำหรับโปรเจกต์ **StickerLine AI** 
+**System:** Mia-U-Sticker / StickerLine AI
+**Current implementation:** `backend/app` + `Frontend`
 
-เอกสารนี้จะลงลึกถึงระดับ **Class, Function, Database Field, และ Logic Algorithm** เพื่อให้ Developer (หรือตัวผมเองในขั้นตอนถัดไป) สามารถเขียน Code ได้ทันทีโดยไม่ต้องเดาครับ
+This document maps production behavior to modules, functions, fields, and control
+flow so implementation changes can be made without guessing.
 
----
+## 1. Repository Structure
 
-# Phase 4: Low-Level Design (LLD) Document
-
-**System:** StickerLine AI (Production)
-
-**Stack:** Python FastAPI (Cloud Run) + React (Firebase) + Firestore
-
-## 1. Backend Project Structure (Python FastAPI)
-
-เราจะใช้โครงสร้างแบบ **Modular Architecture** เพื่อความสะอาดและขยายง่ายครับ
-
-```
+```text
 /backend
-├── Dockerfile                  # Configuration for Cloud Run (Python 3.11)
-├── requirements.txt            # dependencies: fastapi, uvicorn, rembg, numpy, cv2, etc.
-├── app/
-│   ├── __init__.py
-│   ├── main.py                 # Entry point (FastAPI app init)
-│   ├── core/
-│   │   ├── config.py           # Load Env Vars (GCP_PROJECT, OMISE_KEY)
-│   │   ├── security.py         # Verify LIFF Token logic
-│   │   └── exceptions.py       # Custom Exceptions
-│   ├── models/                 # Pydantic Schemas & DB Models
-│   │   ├── user.py
-│   │   ├── job.py
-│   │   └── transaction.py
-│   ├── api/                    # Route Controllers
-│   │   ├── v1/
-│   │   │   ├── auth.py         # POST /sync
-│   │   │   ├── stickers.py     # POST /generate, GET /jobs/{id}
-│   │   │   └── webhooks.py     # POST /omise
-│   ├── services/               # Business Logic (The Brain)
-│   │   ├── user_service.py     # Firestore Logic (Get/Create/Update)
-│   │   ├── ai_service.py       # Vertex AI Integration
-│   │   ├── image_service.py    # Rembg + OpenCV (Slice/Stroke)
-│   │   └── payment_service.py  # Omise Logic
-│   └── utils/
-│       ├── firestore.py        # DB Connection Client
-│       └── storage.py          # GCS Upload/Download helpers
+├── Dockerfile
+├── requirements.txt
+└── app
+    ├── main.py
+    ├── core
+    │   └── config.py
+    ├── api
+    │   ├── deps.py
+    │   └── v1
+    │       ├── auth.py
+    │       ├── upload.py
+    │       ├── stickers.py
+    │       ├── payments.py
+    │       ├── webhooks.py
+    │       └── users.py
+    ├── models
+    │   ├── user.py
+    │   └── sticker.py
+    ├── services
+    │   ├── user_service.py
+    │   ├── ai_service.py
+    │   ├── image_service.py
+    │   └── payment_service.py
+    └── utils
+        ├── firestore.py
+        └── storage.py
+
+/Frontend
+├── App.tsx
+├── api/client.ts
+├── providers/AuthProvider.tsx
+├── pages
+│   ├── LoginPage.tsx
+│   ├── GeneratePage.tsx
+│   └── PaymentPage.tsx
+└── types.ts
 ```
 
----
+## 2. Backend Entry Point
 
-## 2. Database Design (Firestore Detailed Schema)
+### `backend/app/main.py`
 
-ระบุ Field และ Type ให้ชัดเจนเพื่อป้องกัน Data Type Mismatch
+- Creates the FastAPI app.
+- Adds permissive CORS (`allow_origins = ["*"]`) in current code.
+- Registers routers:
+  - `/api/v1/auth`
+  - `/api/v1/users`
+  - `/api/v1/jobs`
+  - `/api/v1`
+  - `/api/v1/payments`
+  - `/webhooks`
+- Root health check returns:
 
-### **Collection: `users`**
+```json
+{ "status": "ok", "service": "stickerline-api" }
+```
 
-*Document ID: `line_user_id` (String)*
+## 3. Configuration
 
-| Field Name | Type | Constraint | Description |
-| --- | --- | --- | --- |
-| `display_name` | String |  | ชื่อจาก LINE Profile |
-| `picture_url` | String |  | URL รูปโปรไฟล์ |
-| `coin_balance` | Integer | Min: 0 | จำนวน Coin คงเหลือ |
-| `total_spent_thb` | Float | Min: 0.0 | ยอดเงินสะสม (สำหรับปลดล็อก Download) |
-| `is_free_trial_used` | Boolean | Default: False | Flag ป้องกันการปั๊ม Coin ฟรี |
-| `created_at` | Timestamp |  | วันที่สมัคร |
-| `updated_at` | Timestamp |  | วันที่อัปเดตล่าสุด |
+### `Settings` in `backend/app/core/config.py`
 
-### **Collection: `jobs`**
+Important fields:
 
-*Document ID: `job_uuid` (String)*
+- GCP: `PROJECT_ID`, `GCS_BUCKET_NAME`
+- LINE: `LIFF_CHANNEL_ID`, `LINE_CHANNEL_SECRET`
+- Beam: `BEAM_BASE_URL`, `BEAM_MERCHANT_ID`, `BEAM_API_KEY`,
+  `BEAM_WEBHOOK_HMAC_KEY`, `PAYMENT_REDIRECT_URL`
+- AI: `VERTEX_MODEL`, `VERTEX_LOCATION`, `GENAI_PROVIDER`, `GEMINI_API_KEY`,
+  `GENAI_FALLBACK_PROVIDER`
+- Generation controls: `GENERATION_CONCURRENCY`,
+  `GENERATION_COOLDOWN_SECONDS`, `GENERATION_MAX_RETRIES`,
+  `GENERATION_RETRY_BASE_DELAY`
 
-| Field Name | Type | Description |
+The backend loads `.env` during local development and ignores extra environment
+variables.
+
+## 4. Auth Layer
+
+### `get_line_profile(authorization)`
+
+Location: `backend/app/api/deps.py`
+
+Algorithm:
+
+1. Require `Authorization` header beginning with `Bearer `.
+2. Extract LIFF access token.
+3. Return cached profile if token cache is fresh.
+4. Call `https://api.line.me/v2/profile`.
+5. Retry timeout/request failures according to config.
+6. If LINE is unavailable but token cache is in grace period, return cached
+   profile.
+7. Require `userId` and `displayName`.
+8. Normalize to:
+
+```python
+{
+    "line_id": data["userId"],
+    "display_name": data["displayName"],
+    "picture_url": data.get("pictureUrl"),
+}
+```
+
+### `assert_user_match(token_line_id, user_id)`
+
+Raises `403` if the verified token user does not match the route/request user.
+All user-owned endpoints use this check.
+
+## 5. Data Models
+
+### `UserCreate`
+
+Location: `backend/app/models/user.py`
+
+```python
+class UserCreate(BaseModel):
+    line_id: str
+    display_name: str
+    picture_url: Optional[str] = None
+```
+
+### `UserInDB`
+
+The current schema keeps legacy fields (`coin_balance`, `total_spent_thb`,
+`is_free_trial_used`) but initializes active users for pay-on-save:
+
+- `coin_balance = 0`
+- `is_free_trial_used = False`
+- `generation_limit = 20`
+- active cycle and export/payment fields default to empty/null.
+
+### `StickerGenerateRequest`
+
+Location: `backend/app/models/sticker.py`
+
+```python
+class StickerGenerateRequest(BaseModel):
+    user_id: str
+    image_uri: str
+    style: str
+    prompt: str
+    locked_indices: list[int] = []
+```
+
+## 6. User Service
+
+Location: `backend/app/services/user_service.py`
+
+### Constants
+
+```python
+GENERATION_LIMIT = 20
+WARNING_START_ATTEMPT = 15
+FINAL_PACK_PRODUCT_ID = "final_pack_199"
+EXTRA_PACK_PRODUCT_ID = "extra_pack_99"
+EXTRA_VAULT_TTL_HOURS = 24
+```
+
+### Exceptions
+
+- `GenerationLimitReachedError(state)`
+- `FinalPackPaymentRequiredError(state)`
+- `ExtraPackPaymentRequiredError(state)`
+
+### `_build_warning(generation_count, generation_limit)`
+
+Returns:
+
+- `None` for 1-14.
+- `gentle` for 15-17.
+- `strong` for 18-19.
+- `limit_reached` for 20+.
+
+Each warning includes `level`, Thai `message`, and `remaining`.
+
+### `_build_generation_state(data)`
+
+Returns frontend-safe normalized state:
+
+```python
+{
+    "cycle_id": data.get("current_cycle_id"),
+    "generation_count": generation_count,
+    "generation_limit": generation_limit,
+    "remaining_attempts": remaining,
+    "is_generation_locked": bool(locked_at and not final_paid_at and remaining == 0),
+    "generation_locked_at": locked_at,
+    "generation_cooldown_until": cooldown_until,
+    "final_pack_paid": bool(final_paid_at),
+    "final_pack_exported": bool(final_exported_at),
+    "extra_pack_paid": bool(extra_pack_paid_at),
+    "extra_pack_exported": bool(extra_pack_exported_at),
+    "extra_pack_selected_ids": data.get("extra_pack_selected_ids") or [],
+    "extra_vault_expires_at": data.get("extra_vault_expires_at"),
+    "warning": self._build_warning(generation_count, generation_limit),
+}
+```
+
+### `_cycle_reset_update(now)`
+
+Creates a new `current_cycle_id` and resets:
+
+- generation count/lock/cooldown
+- current stickers
+- Extra Vault
+- final/extra paid/exported fields
+- final/extra payment link fields
+- legacy current extra-pick fields
+
+### `sync_user(line_profile)`
+
+New user behavior:
+
+- Creates `users/{line_id}`.
+- Sets zero coins and a fresh active cycle.
+
+Existing user behavior:
+
+- Updates display name and profile image.
+- Adds missing cycle fields for old documents without overwriting existing active
+  cycle values.
+
+### `get_cycle_state(user_id)`
+
+- Loads user.
+- Adds defaults for old records.
+- If `generation_cooldown_until <= now` and final pack is unpaid, resets cycle.
+- Returns `_build_generation_state`.
+
+### `prepare_generation_attempt(user_id)`
+
+Firestore transaction:
+
+1. Load user and defaults.
+2. Reset if final pack already exported.
+3. Reset if unpaid cooldown expired.
+4. If final pack paid but not exported, raise `GenerationLimitReachedError`.
+5. If generation count already reached limit and final pack unpaid:
+   - ensure lock/cooldown fields exist.
+   - raise `GenerationLimitReachedError`.
+6. Increment `generation_count`.
+7. If increment reaches 20, set lock/cooldown.
+8. Commit and return generation state.
+
+### `set_current_generation_state(user_id, slots, job_id, extra_picks, extra_picks_unlocked=False)`
+
+Firestore transaction:
+
+- Appends new replaced stickers to existing `extra_vault`.
+- Updates `current_stickers`, `current_stickers_job_id`,
+  `current_stickers_updated_at`.
+- Mirrors `extra_vault` into legacy `current_extra_picks` fields for
+  compatibility.
+
+### `require_final_pack_paid(user_id)`
+
+Raises `FinalPackPaymentRequiredError` unless `final_pack_paid` is true.
+
+### `mark_final_pack_exported(user_id)`
+
+Firestore transaction:
+
+- Requires `final_pack_paid_at`.
+- Sets `final_pack_exported_at = now`.
+- Sets `extra_vault_expires_at = now + 24h`.
+- Sets purchase `exported_at` when `final_pack_payment_link_id` exists.
+- Returns generation state and `extra_vault`.
+
+### `get_extra_vault(user_id)`
+
+- If vault expired, returns empty vault with `extra_vault_expired = true`.
+- If final pack not exported, returns empty vault.
+- Otherwise returns `extra_vault`.
+
+### `require_extra_pack_paid(user_id)`
+
+- Calls `get_extra_vault`.
+- Requires `extra_pack_paid`.
+- Rejects expired vault.
+
+### `mark_extra_pack_exported(user_id)`
+
+Firestore transaction:
+
+- Requires `extra_pack_paid_at`.
+- Sets `extra_pack_exported_at`.
+- Sets purchase `exported_at` when `extra_pack_payment_link_id` exists.
+
+## 7. Sticker API
+
+Location: `backend/app/api/v1/stickers.py`
+
+### Module State
+
+```python
+TARGET_STICKER_COUNT = 16
+ALLOWED_STICKER_COUNTS = {16}
+GENERATION_SEMAPHORE = asyncio.Semaphore(settings.GENERATION_CONCURRENCY)
+USER_COOLDOWN = {}
+```
+
+The semaphore limits concurrent AI/image jobs per process. `USER_COOLDOWN`
+adds a short in-memory delay between user jobs.
+
+### `_process_job(job_id, request, ...)`
+
+Control flow:
+
+1. Set job `queued`.
+2. Apply short in-memory user cooldown.
+3. Acquire generation semaphore.
+4. Set job `processing`.
+5. Generate up to three AI candidates.
+6. For each candidate:
+   - process grid into PNG stickers.
+   - calculate quality warnings:
+     - layout mismatch
+     - edge touch risk
+     - detached artifact risk
+     - residual green-screen risk
+     - subject scale inconsistency
+   - keep the lowest risk candidate.
+7. Require exactly 16 stickers.
+8. Upload raw grid as `users/{user_id}/jobs/{job_id}/grid.png`.
+9. Upload stickers as `users/{user_id}/jobs/{job_id}/{index}.png`.
+10. Merge locked slots:
+    - if index is locked and previous slot exists, reuse previous blob.
+    - otherwise use newly uploaded blob.
+11. For every replaced previous blob, create Extra Vault item:
+
+```python
+{
+    "id": f"{job_id}-{index}-{uuid.uuid4().hex[:8]}",
+    "source_job_id": previous_source_job_id,
+    "replaced_by_job_id": job_id,
+    "replaced_from_slot": index,
+    "blob_name": previous_blob,
+    "created_at": now,
+}
+```
+
+12. Persist current slots and Extra Vault through `UserService`.
+13. Set job `completed`.
+14. On any exception, set job `failed` with `error`.
+
+Current behavior note: generation attempts are not refunded/decremented if the
+async job later fails.
+
+### Main route handlers
+
+| Route | Handler | Notes |
 | --- | --- | --- |
-| `user_id` | String | Ref to `users` |
-| `status` | String | Enum: `pending`, `processing`, `completed`, `failed` |
-| `input_gcs_uri` | String | `gs://...` รูปต้นฉบับ |
-| `style_id` | String | `chibi_2d` หรือ `pixar_3d` |
-| `output_urls` | Array[Str] | List ของ Signed URL (16 รูป) เมื่อเสร็จ |
-| `error_msg` | String | เก็บ Error log กรณี Failed |
-| `created_at` | Timestamp |  |
+| `POST /generate` | `generate_stickers` | Reserves attempt, creates job, starts background task |
+| `GET /{job_id}` | `get_job_status` | Returns signed URLs for completed job slots |
+| `GET /current` | `get_current_stickers` | Returns current slots, generation state, Extra Vault summary |
+| `POST /reset` | `reset_current_stickers` | Resets the active cycle |
+| `GET /current/share-file` | `get_current_sticker_share_file` | Streams one final PNG; requires final payment |
+| `GET /current/download-url` | `get_current_sticker_download_url` | Creates ZIP in GCS; requires final payment |
+| `GET /current/download` | `download_current_sticker_zip` | Streams ZIP; compatibility path |
+| `POST /current/finalize-export` | `finalize_current_final_pack_export` | Marks final export and exposes Extra Vault URLs |
+| `GET /current/extra-vault` | `get_current_extra_vault` | Hides URLs before final export/after expiry |
+| `GET /current/extra-vault/share-file` | `get_current_extra_vault_share_file` | Streams one paid selected extra PNG |
+| `POST /current/extra-vault/download-url` | `get_current_extra_vault_download_url` | Creates ZIP for paid selected extras |
+| `POST /current/extra-vault/finalize-export` | `finalize_current_extra_vault_export` | Marks extra export |
+| `POST /current/extra-picks/unlock` | `unlock_current_extra_picks` | Removed; returns `410 Gone` |
+| `POST /current/extra-picks/apply` | `apply_current_extra_picks` | Removed; returns `410 Gone` |
 
-### **Collection: `transactions`**
+### `_select_extra_vault_items(extra_vault, selected_extra_ids)`
 
-*Document ID: `txn_uuid` (String)*
+Rules:
 
-| Field Name | Type | Description |
-| --- | --- | --- |
-| `user_id` | String | Ref to `users` |
-| `type` | String | Enum: `usage` (gen), `topup` (omise), `refund` (error) |
-| `amount` | Integer | e.g., -1, +12 |
-| `reference_id` | String | Link to `job_id` or `omise_charge_id` |
-| `URL_Public` | string | save link for history user |
+- Trims IDs and removes duplicates.
+- Requires at least one ID.
+- Allows at most 16 IDs.
+- Requires every ID to exist in the current Extra Vault.
+- Returns selected items in requested order.
 
----
+## 8. Upload API
 
-## 3. Algorithm Specification (Logic เจาะลึก)
+Location: `backend/app/api/v1/upload.py`
 
-### **A. User Sync & Free Coin Logic (`services/user_service.py`)**
+### `_decode_base64_image(data)`
 
-```python
-def sync_user(line_profile: dict):
-    user_ref = db.collection('users').document(line_profile['userId'])
-    user_doc = user_ref.get()
+- Strips `data:image/...;base64,` prefix if present.
+- Base64 decodes.
+- Raises `400` on invalid data.
 
-    if not user_doc.exists:
-        # New User: Create + Grant Free Coins
-        new_user = {
-            "display_name": line_profile['displayName'],
-            "coin_balance": 2,  # <--- Logic: Free 2 Coins
-            "is_free_trial_used": True,
-            "total_spent_thb": 0.0,
-            "created_at": firestore.SERVER_TIMESTAMP
-        }
-        user_ref.set(new_user)
-        return new_user
-    else:
-        # Existing User: Return current data
-        return user_doc.to_dict()
-```
+### `upload_image(request)`
 
-### **B. Atomic Coin Deduction (`services/user_service.py`)**
+- Requires valid LINE token.
+- Validates image magic bytes:
+  - JPEG: `0xff 0xd8`
+  - PNG: `0x89PNG`
+  - WEBP: `RIFF`
+- Uploads to `temp/uploads/{uuid}/{filename}`.
+- Returns `gcs_uri` and signed `public_url`.
 
-ต้องใช้ `transaction` ของ Firestore เพื่อป้องกัน Race Condition (เช่น กดรัวๆ แล้วเหรียญติดลบ)
+## 9. Payment Service
 
-```python
-@firestore.transactional
-def deduct_coin(transaction, user_ref):
-    snapshot = user_ref.get(transaction=transaction)
-    balance = snapshot.get("coin_balance")
+Location: `backend/app/services/payment_service.py`
 
-    if balance < 1:
-        raise ValueError("Insufficient coins")
-
-    # Logic: Deduct 1 Coin
-    transaction.update(user_ref, {"coin_balance": balance - 1})
-    return True
-```
-
-### **C. Image Processing Pipeline (`services/image_service.py`)**
-
-นี่คือส่วนที่ซับซ้อนที่สุด (The Core Engine) แปลง Grid 4x4 -> 16 สติกเกอร์
-
-**Algorithm Steps:**
-
-1. **Download:** โหลดรูป Grid (PNG) จาก GCS เข้า Memory.
-2. **Slice Calculation:** คำนวณขนาดช่อง (Width/4, Height/4).
-3. **Loop 16 Times (4 rows x 4 cols):**
-    - **Crop:** ตัดภาพตามพิกัด `(x, y, w, h)`.
-    - **Rembg:** ส่งภาพย่อยเข้า `rembg.remove()` เพื่อลบพื้นหลัง.
-    - **Find Contours:** หาขอบเขตของตัวการ์ตูน (Bounding Box) แล้ว Crop ให้กระชับ (Trim whitespace).
-    - **Add Stroke:** ใช้ OpenCV (`cv2.dilate`) ขยาย Mask สีขาวเพื่อทำขอบ.
-    - **Resize:** ปรับขนาดให้พอดีกับมาตรฐาน Sticker (เช่น 370x320px) โดยรักษา Aspect Ratio.
-    - **Upload:** อัปโหลดกลับ GCS.
-
-**Pseudocode for Slicing & Stroke:**
+### Products
 
 ```python
-import cv2
-import numpy as np
-from rembg import remove
-
-def process_grid_image(image_bytes):
-    # 1. Load Image
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    full_img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
-    h, w, _ = full_img.shape
-
-    step_h, step_w = h // 4, w // 4
-    processed_stickers = []
-
-    for row in range(4):
-        for col in range(4):
-            # 2. Slice
-            y1, y2 = row * step_h, (row + 1) * step_h
-            x1, x2 = col * step_w, (col + 1) * step_w
-            crop = full_img[y1:y2, x1:x2]
-
-            # 3. Remove BG (Library call)
-            # แปลง cv2 -> bytes -> rembg -> cv2
-            crop_no_bg = remove_background_rembg(crop)
-
-            # 4. Add White Stroke
-            final_sticker = add_white_stroke(crop_no_bg, thickness=10)
-
-            processed_stickers.append(final_sticker)
-
-    return processed_stickers
-
-def add_white_stroke(image, thickness):
-    # แยก Alpha channel มาทำ Mask
-    alpha = image[:, :, 3]
-    _, mask = cv2.threshold(alpha, 0, 255, cv2.THRESH_BINARY)
-
-    # ขยาย Mask (Dilate)
-    kernel = np.ones((thickness, thickness), np.uint8)
-    dilated = cv2.dilate(mask, kernel, iterations=1)
-
-    # สร้างภาพสีขาวขนาดเท่าเดิม
-    stroke_layer = np.zeros_like(image, dtype=np.uint8)
-    stroke_layer[:, :, 0:3] = 255 # White color
-    stroke_layer[:, :, 3] = dilated # Alpha from dilated mask
-
-    # ซ้อนภาพต้นฉบับทับภาพ Stroke
-    # (ใช้ Alpha blending logic หรือวางทับตรงๆ ถ้า Mask เป๊ะ)
-    result = overlay_images(stroke_layer, image)
-    return result
-```
-
----
-
-## 4. API Interface Specification (FastAPI)
-
-### **Request: Generate Sticker**
-
-`POST /api/v1/stickers/generate`
-
-```json
 {
-  "input_gcs_uri": "gs://app-bucket/temp/u123/selfie.jpg",
-  "style_id": "chibi_2d",
-  "extra_prompt": "wearing spacesuit"
+    "final_pack_199": {
+        "amount_satang": 19900,
+        "title": "Final Sticker Pack",
+        "description": "Save final 16 stickers",
+    },
+    "extra_pack_99": {
+        "amount_satang": 9900,
+        "title": "Extra Sticker Pack",
+        "description": "Save up to 16 selected extra stickers",
+    },
 }
 ```
 
-### **Response: Job Created**
+### `create_payment_link(user_id, product_id, cycle_id=None, selected_extra_ids=None)`
 
-```json
-{
-  "job_id": "job_550e8400-e29b",
-  "status": "processing",
-  "message": "Deducted 1 coin. AI is working..."
-}
+Validation:
+
+- Beam merchant ID, API key, and redirect URL must be configured.
+- User must exist.
+- Cycle ID resolves from request or user `current_cycle_id`.
+- Final pack:
+  - not already paid.
+  - current stickers exist.
+  - locked expired unpaid cycle cannot be paid.
+- Extra pack:
+  - not already paid.
+  - final pack exported.
+  - vault not expired.
+  - vault not empty.
+  - selected IDs count is 1-16.
+  - selected IDs all exist.
+
+Beam payload:
+
+- `collectDeliveryAddress = false`
+- link settings from feature flags (`card`, `qrPromptPay`, `mobileBanking`, etc.)
+- order currency from `PAYMENT_CURRENCY`
+- `netAmount` in satang
+- `referenceId = "{user}:{product}:{cycle}:{random}"`
+- `redirectUrl` appends `beam_return=1`
+- `expiresAt = now + PAYMENT_LINK_EXPIRY_MINUTES`
+
+Persists `payments/{payment_link_id}` and returns checkout metadata.
+
+### `verify_signature(payload_bytes, signature)`
+
+- Decodes `BEAM_WEBHOOK_HMAC_KEY` from base64.
+- Computes HMAC-SHA256 over raw payload.
+- Compares base64 digest with `X-Beam-Signature`.
+
+### `process_webhook(payload, event, signature, raw_payload)`
+
+- Rejects invalid signature.
+- `payment_link.paid`: applies payment payload directly.
+- `charge.succeeded` with `source = PAYMENT_LINK`: fetches Beam payment link and
+  applies status.
+- Other events are logged and ignored.
+
+### `get_payment_status(payment_link_id)`
+
+- Loads local payment document.
+- If status is not `success`, fetches Beam state and applies it.
+- Returns status, product, cycle, amount, checkout URL, selected extras, expiry,
+  and internal `user_id` for API ownership check.
+
+### `_record_payment_success(payment_link_id, paid_payload, source)`
+
+Firestore transaction:
+
+1. Load payment.
+2. If `processed_at` exists, return.
+3. Check received amount equals expected amount.
+4. Load user.
+5. Validate supported product ID.
+6. Increment `total_spent_thb` for reporting.
+7. Set final or extra paid fields on user.
+8. Create `purchases/purchase_{payment_link_id}`.
+9. Set payment `status = success`, `provider_status = PAID`,
+   `paid_at`, `processed_at`, and `updated_at`.
+
+## 10. AI Service
+
+Location: `backend/app/services/ai_service.py`
+
+### Style mapping
+
+- `Chibi 2D`, `chibi_2d`, `2d` -> premium 2D chibi prompt.
+- `Pixar 3D`, `pixar_3d`, `3d` -> cute premium 3D prompt.
+- Unsupported style raises `ValueError`.
+
+### Caption handling
+
+- If prompt contains no-text intent (`no text`, `ไม่มีข้อความ`, etc.), AI is
+  instructed to generate without captions.
+- If quoted captions exist, use them exactly and in order when possible.
+- If custom prompt exists, derive captions from user theme.
+- Otherwise use default Thai chat captions.
+
+### Provider behavior
+
+- `GENAI_PROVIDER=vertex`: initializes Vertex AI and `GenerativeModel`.
+- `GENAI_PROVIDER=gemini_api`/aliases: uses Gemini API with inline base64 image.
+- `GENAI_PROVIDER=auto`: uses Gemini API if `GEMINI_API_KEY` exists, otherwise
+  Vertex.
+- Retryable Vertex failures may fall back to Gemini API when configured.
+- User-facing retry exhaustion message:
+  `ระบบหนาแน่น กรุณารอ 5 นาที แล้วลองใหม่`
+
+## 11. Image Processor
+
+Location: `backend/app/services/image_service.py`
+
+### Supported layout
+
+- Target: 4 columns x 4 rows.
+- Raw sheet must be approximately square:
+  - min aspect ratio `0.88`
+  - max aspect ratio `1.14`
+- Detects and rejects likely unsupported layouts such as 4x5, 5x4, 5x5, 3x5,
+  5x3, 4x3, and 3x4.
+
+### `process_sticker_grid(image_bytes, columns=None, rows=None)`
+
+1. Decode bytes to OpenCV image.
+2. Trim solid green margin.
+3. Validate raw grid when layout override is not provided.
+4. Resolve grid edges.
+5. For each cell:
+   - crop with small overscan.
+   - build core anchor alpha.
+   - apply safe inset.
+   - process a single sticker.
+6. Return list of PNG bytes.
+
+### `_process_single_sticker(cv_img, core_bounds, anchor_alpha)`
+
+1. Extract foreground RGBA from green-screen cell.
+2. Filter foreground components using core bounds/anchor alpha.
+3. Clean top-strip artifacts, pure green pockets, caption baseline fringe,
+   detached artifacts, and residual green-screen pixels.
+4. Crop content with asymmetric padding to preserve Thai text.
+5. Add a thin white stroke.
+6. Resize and center on a 370x320 transparent canvas with padding.
+7. Encode PNG.
+
+### Quality assessments
+
+The generation orchestrator calls:
+
+- `assess_sticker_set_edge_risk`
+- `assess_sticker_set_artifact_risk`
+- `assess_sticker_set_residual_screen_risk`
+- `assess_subject_scale_consistency`
+
+These warnings are stored on the job but do not necessarily fail the job if the
+best candidate is still a valid 16-sticker set.
+
+## 12. Storage Client
+
+Location: `backend/app/utils/storage.py`
+
+### `upload_file`
+
+- Uploads bytes to GCS.
+- Returns a V4 signed URL valid for 1 hour.
+- Supports response disposition/type overrides for ZIP downloads.
+
+### `generate_signed_url`
+
+- Generates a signed URL for an existing blob.
+- Uses IAM signer with refreshed default credentials when service account email
+  is available, otherwise falls back to default blob signing.
+
+### `download_gcs_uri`
+
+- Validates `gs://bucket/path`.
+- Downloads bytes from GCS.
+
+## 13. Frontend Control Flow
+
+### Auth
+
+`AuthProvider`:
+
+1. Requires `VITE_LIFF_ID`.
+2. Calls `liff.init`.
+3. If logged in, stores `line_access_token`.
+4. Calls `syncUser`.
+5. Sets `profile`.
+
+### Generate page state
+
+Key state:
+
+- `config.base64Image`
+- `config.style`
+- `config.extraPrompt`
+- `stickerSlots`
+- `extraSlots`
+- `selectedExtraIds`
+- `generationState`
+- `checkoutProduct`
+- `isCreatingPayment`
+- `isSavingFinal`
+- `isExtraExporting`
+
+View state:
+
+```ts
+checkoutProduct ? "checkout"
+: finalPackExported && extraPackExported ? "done"
+: finalPackPaid ? "success"
+: "workspace"
 ```
 
-### **Request: Omise Webhook**
+### Generate/regenerate
 
-`POST /api/v1/webhooks/omise`
+`generateSheet()`:
 
-*Headers:* `User-Agent: Omise`, `X-Omise-Signature: ...`
+1. Requires online status, profile, and base image.
+2. If current grid exists, requires at least one unlocked sticker.
+3. Uploads base image.
+4. Builds `locked_indices` from locked slots.
+5. Starts generation job.
+6. Polls job every 2 seconds up to 180 attempts.
+7. Refreshes current stickers.
+8. Shows warning modal for non-limit warnings.
+9. Displays generation limit/cooldown errors from backend state.
 
-```json
-{
-  "object": "event",
-  "key": "evnt_...",
-  "data": {
-    "object": "charge",
-    "status": "successful",
-    "amount": 10000, // 100.00 THB
-    "metadata": {
-      "user_id": "U123456"
-    }
-  }
-}
-```
+### Final save
 
----
+`handleSaveFinalPack()`:
 
-## 5. Security & Env Variables
+- If final pack is unpaid, opens checkout for `final_pack_199`.
+- If paid, calls `saveFinalPackToDevice(true)`.
 
-ไฟล์ `.env` (สำหรับการพัฒนา) หรือ Cloud Run Environment Variables:
+`saveFinalPackToDevice(finalizeAfterSave)`:
 
-```bash
-# General
-ENV=production
-PROJECT_ID=my-sticker-project
+- On Android inside LIFF, redirects to external browser with `saveToPhotos=1`.
+- If native file share is available, downloads individual PNG blobs and calls
+  `navigator.share({ files })`.
+- Otherwise requests `current/download-url` and opens the ZIP signed URL.
+- Calls `finalizeCurrentStickerExport` after the save/share/download flow when
+  `finalizeAfterSave` is true.
 
-# Database & Storage
-FIRESTORE_DB=default
-GCS_BUCKET_NAME=app-sticker-assets
+### Extra Vault
 
-# Authentication
-LIFF_CHANNEL_ID=165xxxxxxx
-LINE_CHANNEL_SECRET=xxxxxx  # Keep in Secret Manager
+- Final export response populates `extraSlots` and preselects first 16.
+- Selection is limited to 16 in frontend and backend.
+- `handleBuyExtraPack()` requires at least one selected extra and creates
+  `extra_pack_99` Beam payment.
+- `saveExtraVaultToDevice()` uses native file share when available, otherwise
+  creates a ZIP via `extra-vault/download-url`.
+- Extra export finalize is called after save/share/download.
 
-# Payment
-OMISE_SECRET_KEY=skey_test_xxxxxx # Keep in Secret Manager
-OMISE_PUBLIC_KEY=pkey_test_xxxxxx
+### Payment page
 
-# AI
-VERTEX_AI_LOCATION=us-central1
-```
+`PaymentPage`:
 
----
+- Reads payment ID from URL query or local storage.
+- Reads product/checkout/expiry from local storage.
+- On Beam return (`beam_return=1`), calls backend payment status endpoint.
+- On success, clears pending payment, refreshes profile, and returns to
+  `/generate`.
+
+## 14. Legacy Code Paths
+
+- `coin_balance`, `is_free_trial_used`, and `total_spent_thb` are retained in
+  models and user documents for compatibility/history.
+- The current production flow does not deduct coins, grant free coins, or sell
+  coin packages.
+- `GET /api/v1/users/{user_id}/permissions` still checks
+  `total_spent_thb >= 30`; this is legacy and should not be used for new export
+  authorization.
+- `/current/extra-picks/unlock` and `/current/extra-picks/apply` intentionally
+  return `410 Gone`.
+
+## 15. Failure and Edge Cases
+
+- LINE timeout can use cached profile only within grace window.
+- Beam link creation fails fast when Beam config is incomplete.
+- Invalid Beam webhook signatures are rejected with `403`.
+- Payment amount mismatch fails payment processing.
+- Attempt reservation happens before async generation; failed jobs still count
+  against the cycle in current production.
+- Extra Vault expiry returns empty vault instead of physically deleting old blobs.
+- Download/share endpoints fail with `402 payment_required` when entitlement is
+  missing.
+- Current code supports only 16 processed stickers even though the frontend has a
+  defensive local allowance for 15/16 in some display paths.
