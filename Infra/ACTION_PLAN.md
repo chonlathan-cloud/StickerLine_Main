@@ -173,8 +173,19 @@ Grant to Pub/Sub service agent:
   `roles/iam.serviceAccountTokenCreator`
 - Target service account:
   `stickerline-pubsub-invoker@skitkerline.iam.gserviceaccount.com`
+- Role:
+  `roles/pubsub.publisher`
+- Target topic:
+  `sticker-generation-jobs-dlq`
+- Role:
+  `roles/pubsub.subscriber`
+- Target subscription:
+  `sticker-generation-jobs-worker-push`
 
 This allows Pub/Sub to mint an OIDC token as the push caller service account.
+The Pub/Sub subscriber binding is also required for DLQ forwarding because the
+service agent must acknowledge source subscription messages after moving them
+to the dead-letter topic.
 
 ### Deployment Actor Roles
 
@@ -316,6 +327,9 @@ Non-secret environment variables:
 - `PAYMENT_LINK_EXPIRY_MINUTES=30`
 - `PAYMENT_CURRENCY=THB`
 - Beam payment method flags
+- `CORS_ALLOWED_ORIGINS` comma-separated exact frontend/local origins.
+- `CORS_ALLOW_ORIGIN_REGEX` for Cloud Run frontend URL variants such as
+  `https://stickerline-fe-<hash>-as.a.run.app`.
 - `VERTEX_MODEL=gemini-3-pro-image-preview`
 - `VERTEX_LOCATION=global`
 - `GENAI_PROVIDER=vertex`
@@ -343,6 +357,8 @@ Implementation note:
 - Public Cloud Run service for current phase.
 - Restrict CORS to:
   `https://stickerline-fe-917214899974.asia-southeast1.run.app`
+- Also allow the active Cloud Run frontend hash URL through
+  `CORS_ALLOW_ORIGIN_REGEX`.
 - Recommended next hardening:
   - Global External HTTPS Load Balancer
   - Cloud Armor managed WAF rules
@@ -372,18 +388,26 @@ Files to create during implementation:
 
 - `Infra/bootstrap_infra.sh`
   - one-time/idempotent infra setup;
-  - creates Pub/Sub topic, DLQ topic, subscriptions, IAM bindings, alert policy
-    placeholders, and validates required services/secrets.
+  - creates Pub/Sub topic, DLQ topic, subscriptions, service accounts, IAM
+    bindings, optional monitoring email channel, and validates required
+    services/secrets;
+  - can be run before worker deploy for topics/IAM, then rerun after worker
+    deploy to create/update the push subscription.
 - `backend_stickerline-be.sh`
   - builds/pushes the backend image or reuses an image tag;
   - deploys Cloud Run service `stickerline-be`;
   - uses runtime SA `stickerline-be-sa`;
-  - sets gateway env vars/secrets.
+  - sets gateway env vars/secrets;
+  - defaults to `GENERATION_DISPATCH_MODE=local_async` and
+    `ENABLE_PUBSUB_WORKER_ENDPOINT=false`.
 - `backend_stickerline-worker.sh`
+  - builds/pushes the worker image or reuses an image tag;
   - deploys Cloud Run service `stickerline-worker`;
   - uses runtime SA `stickerline-worker-sa`;
   - sets worker env vars/secrets;
-  - uses private/authenticated ingress settings.
+  - uses private/authenticated ingress settings;
+  - defaults to `ENABLE_PUBSUB_WORKER_ENDPOINT=true`, `concurrency=1`,
+    `cpu=1`, `timeout=600`, and `max-instances=200`.
 
 Terraform will be deferred until the flow is stable.
 
@@ -394,6 +418,9 @@ use guardrails:
 
 - Billing budget alerts at 50%, 80%, 100%, and 150%.
 - Worker max instances capped at `200`.
+- Worker default CPU is `1` so `200` max instances fits the current
+  `CpuAllocPerProjectRegion=200 vCPU` regional quota. If worker CPU is raised
+  to `2`, cap max instances at `100` or request a regional CPU quota increase.
 - Cloud Armor rate limiting in front of the public gateway.
 - App-level overload protection:
   - if queue depth or oldest unacked age exceeds threshold, temporarily reject new
@@ -545,9 +572,11 @@ Use p50/p95/p99 to decide whether:
 - Create `backend_stickerline-be.sh`.
 - Create `backend_stickerline-worker.sh`.
 - Create `Infra/bootstrap_infra.sh`.
-- Deploy gateway and worker from the same backend image.
+- Deploy gateway and worker from the same backend app/Dockerfile.
 - Configure Cloud Run secrets through Secret Manager.
 - Configure push subscription to the stable worker URL.
+- Keep gateway in `GENERATION_DISPATCH_MODE=local_async` until Phase 5
+  end-to-end Pub/Sub validation passes.
 
 ### Phase 5: Staging Test and Observability
 

@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     LINE_PROFILE_REQUEST_TIMEOUT: float = 10.0
     LINE_PROFILE_REQUEST_RETRIES: int = 1
     LINE_PROFILE_RETRY_DELAY: float = 0.5
+    CORS_ALLOWED_ORIGINS: str = (
+        "http://localhost:3000,"
+        "http://localhost:3002,"
+        "http://192.168.15.190:3002,"
+        "https://stickerline-fe-917214899974.asia-southeast1.run.app"
+    )
+    CORS_ALLOW_ORIGIN_REGEX: str | None = r"^https://stickerline-fe-[a-z0-9-]+\.a\.run\.app$"
     GENERATION_DISPATCH_MODE: str = "local_async"
     GENERATION_CONCURRENCY: int = 1
     GENERATION_COOLDOWN_SECONDS: int = 30

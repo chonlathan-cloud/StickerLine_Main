@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
 
 app = FastAPI(
     title="StickerLine AI API",
@@ -7,16 +8,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS (Should be restricted in production config to frontend domain)
-origins = [
-    "http://localhost:3002",       # สำหรับเทส Local
-    "http://192.168.15.190:3002", # สำหรับเทสในเครือข่ายเดียวกัน
-    "https://3374-171-102-98-38.ngrok-free.app", # URL ฝั่ง Frontend ถ้ามีการผ่าน ngrok
-]
+def _parse_cors_origins(value: str) -> list[str]:
+    return [
+        origin.strip().rstrip("/")
+        for origin in value.split(",")
+        if origin.strip()
+    ]
+
+
+origins = _parse_cors_origins(settings.CORS_ALLOWED_ORIGINS)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
