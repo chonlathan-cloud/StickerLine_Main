@@ -2,6 +2,7 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 pydantic-settings>=2.0.0
 google-cloud-firestore>=2.11.1
+google-cloud-pubsub>=2.21.0
 google-cloud-storage>=2.10.0
 google-cloud-aiplatform>=1.30.0
 numpy>=1.24.0

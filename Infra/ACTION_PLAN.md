@@ -321,13 +321,18 @@ Non-secret environment variables:
 - `GENAI_PROVIDER=vertex`
 - `GENAI_FALLBACK_PROVIDER=gemini_api`
 - generation retry/concurrency tuning vars
-- Pub/Sub topic/subscription names for gateway/worker code
+- `GENERATION_DISPATCH_MODE=local_async` for rollback-safe monolith behavior
+  or `GENERATION_DISPATCH_MODE=pubsub` after the worker path is ready.
+- `PUBSUB_PROJECT_ID=skitkerline` optional; defaults to `PROJECT_ID`.
+- `STICKER_GENERATION_TOPIC=sticker-generation-jobs`
+- `PUBSUB_PUBLISH_TIMEOUT_SECONDS=10`
+- Pub/Sub subscription names for infra scripts/worker code
 
 Implementation note:
 
-- Current `Settings` requires some values globally. During implementation,
-  either provide compatible env vars to both services or split settings into
-  gateway and worker config classes.
+- Gateway publish mode should not initialize AI/image/storage worker dependencies
+  in the request path. Those dependencies remain only for `local_async` fallback
+  and the worker service.
 
 ## Networking and Security
 
@@ -513,15 +518,17 @@ Use p50/p95/p99 to decide whether:
 - Refactor `POST /api/v1/jobs/generate`:
   - reserve attempt;
   - create job with `queued_at`;
-  - publish Pub/Sub message;
-  - remove `asyncio.create_task`.
+  - if `GENERATION_DISPATCH_MODE=pubsub`, publish Pub/Sub message and persist
+    `pubsub_message_id`/`published_at`;
+  - if `GENERATION_DISPATCH_MODE=local_async`, keep `asyncio.create_task` as the
+    rollback-safe execution path.
 - Preserve response contract for frontend polling.
 - Keep status/current/export/payment endpoints in gateway.
 
 ### Phase 3: Worker Implementation
 
-- Move shared job processing out of `stickers.py` into a reusable processor
-  module.
+- Reuse `backend/app/services/generation_job_processor.py` from the Phase 1
+  checkpoint.
 - Create a worker FastAPI entrypoint.
 - Add `POST /pubsub/push`.
 - Decode Pub/Sub message data.

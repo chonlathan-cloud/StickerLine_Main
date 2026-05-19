@@ -15,26 +15,33 @@ from app.services.user_service import (
     GenerationLimitReachedError,
     UserService,
 )
-from app.services.ai_service import AIService
-from app.services.generation_job_processor import process_generation_job
-from app.services.image_service import ImageProcessor
+from app.services.pubsub_service import PubSubPublishError, PubSubService
+from app.core.config import settings
 from app.utils.storage import StorageClient
 from app.utils.firestore import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+VALID_GENERATION_DISPATCH_MODES = {"local_async", "pubsub"}
 
 def get_user_service():
     return UserService()
 
 def get_ai_service():
+    from app.services.ai_service import AIService
+
     return AIService()
 
 def get_image_processor():
+    from app.services.image_service import ImageProcessor
+
     return ImageProcessor()
 
 def get_storage_client():
     return StorageClient()
+
+def get_pubsub_service():
+    return PubSubService()
 
 class ResetStickerSetRequest(BaseModel):
     user_id: str
@@ -63,6 +70,15 @@ def _utc_now():
 
 def _get_jobs_collection():
     return get_db().collection("jobs")
+
+def _get_generation_dispatch_mode() -> str:
+    mode = (settings.GENERATION_DISPATCH_MODE or "local_async").strip().lower()
+    if mode not in VALID_GENERATION_DISPATCH_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Invalid GENERATION_DISPATCH_MODE: {settings.GENERATION_DISPATCH_MODE}",
+        )
+    return mode
 
 def _extract_slot_index(slot: dict) -> int:
     try:
@@ -140,9 +156,7 @@ def _select_extra_vault_items(extra_vault: list[dict], selected_extra_ids: list[
 async def generate_stickers(
     request: StickerGenerateRequest,
     user_service: UserService = Depends(get_user_service),
-    ai_service: AIService = Depends(get_ai_service),
-    image_processor: ImageProcessor = Depends(get_image_processor),
-    storage_client: StorageClient = Depends(get_storage_client),
+    pubsub_service: PubSubService = Depends(get_pubsub_service),
     token_profile: dict = Depends(get_line_profile),
 ):
     """
@@ -150,6 +164,12 @@ async def generate_stickers(
     """
     user_id = request.user_id
     assert_user_match(token_profile["line_id"], user_id)
+    dispatch_mode = _get_generation_dispatch_mode()
+
+    if dispatch_mode == "local_async":
+        ai_service = get_ai_service()
+        image_processor = get_image_processor()
+        storage_client = get_storage_client()
 
     try:
         generation_state = await user_service.prepare_generation_attempt(user_id)
@@ -167,31 +187,71 @@ async def generate_stickers(
         
     job_id = str(uuid.uuid4())
     job_ref = _get_jobs_collection().document(job_id)
+    now = _utc_now()
     await job_ref.set({
         "job_id": job_id,
         "user_id": user_id,
         "cycle_id": generation_state.get("cycle_id"),
         "status": "queued",
+        "dispatch_mode": dispatch_mode,
         "sticker_count": None,
         "generation_state": generation_state,
-        "created_at": _utc_now(),
-        "updated_at": _utc_now(),
+        "queued_at": now,
+        "created_at": now,
+        "updated_at": now,
     })
 
-    asyncio.create_task(
-        process_generation_job(
-            job_id=job_id,
-            request=request,
-            user_service=user_service,
-            ai_service=ai_service,
-            image_processor=image_processor,
-            storage_client=storage_client,
+    if dispatch_mode == "pubsub":
+        try:
+            message_id = await pubsub_service.publish_generation_job(
+                job_id=job_id,
+                user_id=user_id,
+                cycle_id=generation_state.get("cycle_id"),
+            )
+        except PubSubPublishError as exc:
+            logger.exception("Failed to dispatch generation job %s to Pub/Sub", job_id)
+            failed_at = _utc_now()
+            await job_ref.update({
+                "status": "failed",
+                "error": "generation_dispatch_failed",
+                "dispatch_error": str(exc),
+                "failed_at": failed_at,
+                "updated_at": failed_at,
+            })
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error_code": "generation_dispatch_failed",
+                    "job_id": job_id,
+                },
+            ) from exc
+        try:
+            published_at = _utc_now()
+            await job_ref.update({
+                "pubsub_message_id": message_id,
+                "published_at": published_at,
+                "updated_at": published_at,
+            })
+        except Exception:
+            logger.exception("Published generation job %s but failed to persist Pub/Sub metadata", job_id)
+    else:
+        from app.services.generation_job_processor import process_generation_job
+
+        asyncio.create_task(
+            process_generation_job(
+                job_id=job_id,
+                request=request,
+                user_service=user_service,
+                ai_service=ai_service,
+                image_processor=image_processor,
+                storage_client=storage_client,
+            )
         )
-    )
 
     return {
         "job_id": job_id,
         "status": "queued",
+        "dispatch_mode": dispatch_mode,
         "generation_state": generation_state,
     }
 

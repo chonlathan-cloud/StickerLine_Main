@@ -9,7 +9,9 @@ app = FastAPI(
 
 # Configure CORS (Should be restricted in production config to frontend domain)
 origins = [
-    "*",
+    "http://localhost:3002",       # สำหรับเทส Local
+    "http://192.168.15.190:3002", # สำหรับเทสในเครือข่ายเดียวกัน
+    "https://3374-171-102-98-38.ngrok-free.app", # URL ฝั่ง Frontend ถ้ามีการผ่าน ngrok
 ]
 
 app.add_middleware(

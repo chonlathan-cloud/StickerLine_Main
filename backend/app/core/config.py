@@ -33,10 +33,14 @@ class Settings(BaseSettings):
     LINE_PROFILE_REQUEST_TIMEOUT: float = 10.0
     LINE_PROFILE_REQUEST_RETRIES: int = 1
     LINE_PROFILE_RETRY_DELAY: float = 0.5
+    GENERATION_DISPATCH_MODE: str = "local_async"
     GENERATION_CONCURRENCY: int = 1
     GENERATION_COOLDOWN_SECONDS: int = 30
     GENERATION_MAX_RETRIES: int = 8
     GENERATION_RETRY_BASE_DELAY: float = 5.0
+    PUBSUB_PROJECT_ID: str | None = None
+    STICKER_GENERATION_TOPIC: str = "sticker-generation-jobs"
+    PUBSUB_PUBLISH_TIMEOUT_SECONDS: float = 10.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
