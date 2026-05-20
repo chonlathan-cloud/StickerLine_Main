@@ -31,6 +31,14 @@ lerna-debug.log*
 backend/tmp/
 # comment
 
+# Generated local test outputs
+Infra/capacity_reports/
+Infra/model_test_outputs/
+Infra/production_job_diagnostics/
+
+# Local model test input images
+bug/TestModel/
+
 # Local service account keys
 *.json
 skitkerline-b6ca02223361.json

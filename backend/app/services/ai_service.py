@@ -3,6 +3,7 @@ import base64
 import logging
 import random
 import re
+from dataclasses import dataclass
 from typing import Optional, Callable, Awaitable, Any
 
 import httpx
@@ -16,7 +17,18 @@ from app.utils.storage import StorageClient
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class StickerGridGenerationResult:
+    image_bytes: bytes
+    provider: str
+    model_id: str
+    prompt_profile: str
+
+
 class AIService:
+    LEGACY_PROMPT_PROFILE = "legacy"
+    GEMINI_31_FLASH_PROMPT_PROFILE = "gemini_31_flash"
     LOCKED_PROMPT_CHIBI_2D = "Art Style: Premium 2D Chibi, bold black outlines, vibrant flat colors."
     LOCKED_PROMPT_PIXAR_3D = (
         "Art Style: Cute premium 3D character (Pixar-like sticker quality, original character only).\n"
@@ -42,6 +54,22 @@ class AIService:
         "Keep camera distance and subject scale consistent across all 16 cells. "
         "Each character should occupy roughly the same visual height in every cell, around 70-78% of the cell height. "
         "Captions must sit directly over the #00FF00 background; do not add green underlines, colored bars, highlight strips, baseline blocks, or caption boxes."
+    )
+    GEMINI_31_FLASH_PROMPT_ADDENDUM = (
+        "MODEL-SPECIFIC RULES FOR GEMINI 3.1 FLASH IMAGE (CRITICAL):\n"
+        "- Place every caption in the bottom quarter of its own cell, bottom-center only.\n"
+        "- Never place caption text, title text, or large Thai words above the character's head.\n"
+        "- Keep the area above hair, hats, props, and hands clean. Do not add stray curved strokes, loose black marks, small white outline scraps, sparkle crumbs, or detached accent marks near the top of a sticker.\n"
+        "- Avoid decorative symbols that float above the subject unless the user explicitly asks for them; if used, keep them visually intentional, inside the cell, and not attached to the crop edge.\n"
+        "- Keep character, props, caption, and shadow as one clean sticker silhouette that will survive chroma-key cropping."
+    )
+    GEMINI_31_FLASH_RETRY_PROMPT_ADDENDUM = (
+        "GEMINI 3.1 QUALITY RETRY RULES (CRITICAL):\n"
+        "- The previous output had crop/compliance risk. Regenerate the entire 4x4 sheet cleanly.\n"
+        "- Captions must remain at bottom-center only; no top captions or title-like text above heads.\n"
+        "- Remove all tiny floating fragments, broken shadow pieces, loose text-outline crumbs, detached slivers, and small black/white marks above hair.\n"
+        "- Do not create random decorative strokes, stray punctuation, loose zzz marks, spark crumbs, or accent marks that are not part of the Thai caption.\n"
+        "- Use simple empty #00FF00 gutters and keep every sticker fully inside its own cell."
     )
     DEFAULT_THAI_CAPTIONS = [
         "สวัสดี",
@@ -80,7 +108,16 @@ class AIService:
         self.fallback_max_retries = max(0, settings.GENAI_FALLBACK_MAX_RETRIES)
         self.gemini_api_key = settings.GEMINI_API_KEY
         self.gemini_api_base_url = settings.GEMINI_API_BASE_URL.rstrip("/")
-        self.model_id = settings.VERTEX_MODEL
+        self.model_routing_enabled = bool(settings.GENAI_MODEL_ROUTING_ENABLED)
+        self.vertex_model_ids = self._build_vertex_model_route()
+        self.model_id = self.vertex_model_ids[0]
+        self.prompt_profile_setting = (settings.GENAI_PROMPT_PROFILE or "auto").strip().lower()
+        self.gemini_api_fallback_model_id = (
+            (settings.GENAI_GEMINI_API_FALLBACK_MODEL or "").strip()
+            or settings.VERTEX_MODEL.strip()
+            or self.model_id
+        )
+        self._vertex_models: dict[str, GenerativeModel] = {}
 
         try:
             if self.provider in self.GEMINI_PROVIDER_ALIASES:
@@ -91,16 +128,85 @@ class AIService:
                 logger.info("Gemini API (AI Studio) client initialized.")
             elif self.provider == "vertex":
                 vertexai.init(project=settings.PROJECT_ID, location=settings.VERTEX_LOCATION)
-                self.model = GenerativeModel(self.model_id)
                 self.generation_config = GenerationConfig(
                     response_modalities=[GenerationConfig.Modality.IMAGE]
                 )
-                logger.info("Vertex AI model initialized.")
+                self.model = self._get_vertex_model(self.model_id)
+                logger.info(
+                    "Vertex AI model initialized. routing_enabled=%s route=%s",
+                    self.model_routing_enabled,
+                    self.vertex_model_ids,
+                )
             else:
                 raise ValueError(f"Unsupported GENAI_PROVIDER: {self.provider}")
         except Exception as e:
             logger.error(f"Failed to initialize AI provider ({self.provider}): {e}")
             raise e
+
+    def _build_vertex_model_route(self) -> list[str]:
+        if not self.model_routing_enabled:
+            return [settings.VERTEX_MODEL.strip()]
+
+        route_value = (settings.GENAI_VERTEX_MODEL_ROUTE or "").strip()
+        if route_value:
+            candidates = [item.strip() for item in route_value.split(",")]
+        else:
+            candidates = [
+                (settings.PRIMARY_VERTEX_MODEL or settings.VERTEX_MODEL).strip(),
+                (settings.FALLBACK_VERTEX_MODEL or "").strip(),
+            ]
+
+        route: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            route.append(candidate)
+            seen.add(candidate)
+
+        if not route:
+            raise ValueError("GENAI model routing is enabled but no Vertex model route was configured.")
+        return route
+
+    def primary_vertex_model_id(self) -> str | None:
+        if self.provider != "vertex" or not self.vertex_model_ids:
+            return None
+        return self.vertex_model_ids[0]
+
+    def quality_fallback_vertex_model_ids(self) -> list[str]:
+        if self.provider != "vertex" or not settings.GENAI_QUALITY_FALLBACK_ENABLED:
+            return []
+        return self.vertex_model_ids[1:]
+
+    def _get_vertex_model(self, model_id: str) -> GenerativeModel:
+        model = self._vertex_models.get(model_id)
+        if model is None:
+            model = GenerativeModel(model_id)
+            self._vertex_models[model_id] = model
+        return model
+
+    def _resolve_prompt_profile(self, model_id: str | None = None) -> str:
+        configured = self.prompt_profile_setting
+        if configured and configured not in {"auto", "default"}:
+            normalized = configured.replace("-", "_").strip().lower()
+            if normalized in {"gemini31_flash", "gemini_31", "gemini_31_flash", "3_1_flash"}:
+                return self.GEMINI_31_FLASH_PROMPT_PROFILE
+            if normalized in {"legacy", "gemini_30_pro", "gemini_3_pro", "default"}:
+                return self.LEGACY_PROMPT_PROFILE
+            logger.warning("Unknown GENAI_PROMPT_PROFILE=%s. Falling back to auto.", configured)
+
+        candidate = (model_id or self.model_id or "").strip().lower()
+        if "gemini-3.1-flash-image" in candidate or "gemini_3.1_flash_image" in candidate:
+            return self.GEMINI_31_FLASH_PROMPT_PROFILE
+        return self.LEGACY_PROMPT_PROFILE
+
+    def _build_model_profile_instruction(self, prompt_profile: str, strict_cell_framing: bool) -> str:
+        if prompt_profile != self.GEMINI_31_FLASH_PROMPT_PROFILE:
+            return ""
+
+        if strict_cell_framing:
+            return f"{self.GEMINI_31_FLASH_PROMPT_ADDENDUM}\n{self.GEMINI_31_FLASH_RETRY_PROMPT_ADDENDUM}"
+        return self.GEMINI_31_FLASH_PROMPT_ADDENDUM
 
     def _resolve_style_prompt(self, style_id: str) -> str:
         normalized = style_id.strip().lower()
@@ -200,6 +306,49 @@ class AIService:
             "- Use a natural, chat-friendly variety of poses and expressions."
         )
 
+    def _build_full_prompt(
+        self,
+        style_id: str,
+        extra_prompt: Optional[str],
+        strict_cell_framing: bool,
+        model_id: str | None = None,
+    ) -> tuple[str, str]:
+        prompt_profile = self._resolve_prompt_profile(model_id)
+        style_prompt = self._resolve_style_prompt(style_id)
+        text_instruction = self._build_text_instruction(extra_prompt)
+        user_direction = self._build_user_direction_instruction(extra_prompt)
+        model_profile_instruction = self._build_model_profile_instruction(
+            prompt_profile=prompt_profile,
+            strict_cell_framing=strict_cell_framing,
+        )
+        framing_retry_instruction = (
+            "FRAMING RETRY RULES (CRITICAL):\n"
+            "- Output exactly 16 stickers arranged in a strict 4 columns x 4 rows grid on a square 1:1 canvas.\n"
+            "- Do not produce a portrait sheet, landscape sheet, 4x5, 5x4, 5x3, 15 stickers, a fifth row, or any other layout.\n"
+            "- Keep every prop, limb, caption, and accessory fully inside its own cell with extra margin.\n"
+            "- Reserve at least 10% empty space from every cell edge; do not let any object or text touch the boundary.\n"
+            "- Maintain the same camera distance and same subject size across all cells; do not mix close-up stickers with full-body stickers.\n"
+            "- Keep each character at a consistent scale, targeting about 72-76% of the cell height.\n"
+            "- Hanging props near the top, wide props near the sides, and Thai captions near the bottom must stay comfortably inside the safe area.\n"
+            "- If a composition feels tight, make the character and props slightly smaller rather than filling the cell.\n"
+            "- Do not add visible grid outlines, black divider lines, or rectangular panels while correcting framing.\n"
+            if strict_cell_framing
+            else ""
+        )
+
+        full_prompt = (
+            f"{self.TECHNICAL_TOKENS}\n"
+            "Objective: Create a professional 16-pose sticker sheet (4 columns by 4 rows) on a square 1:1 canvas based on the uploaded photo.\n"
+            f"{style_prompt}\n"
+            f"{text_instruction}\n"
+            f"{user_direction}\n"
+            f"{model_profile_instruction}\n"
+            f"{framing_retry_instruction}\n"
+            "Subject Identity Rule: maintain recognizable facial identity from the uploaded photo.\n"
+            "Character should be positioned clearly in each grid cell."
+        ).strip()
+        return full_prompt, prompt_profile
+
     async def generate_sticker_grid(
         self,
         image_uri: str,
@@ -207,78 +356,147 @@ class AIService:
         extra_prompt: Optional[str],
         strict_cell_framing: bool = False,
     ) -> bytes:
+        result = await self.generate_sticker_grid_with_metadata(
+            image_uri=image_uri,
+            style_id=style_id,
+            extra_prompt=extra_prompt,
+            strict_cell_framing=strict_cell_framing,
+        )
+        return result.image_bytes
+
+    async def generate_sticker_grid_with_metadata(
+        self,
+        image_uri: str,
+        style_id: str,
+        extra_prompt: Optional[str],
+        strict_cell_framing: bool = False,
+        vertex_model_route_override: list[str] | None = None,
+    ) -> StickerGridGenerationResult:
         """
         Calls Vertex AI Gemini model to generate a sticker grid.
         Returns the raw image bytes.
         """
         try:
-            style_prompt = self._resolve_style_prompt(style_id)
-            text_instruction = self._build_text_instruction(extra_prompt)
-            user_direction = self._build_user_direction_instruction(extra_prompt)
-            framing_retry_instruction = (
-                "FRAMING RETRY RULES (CRITICAL):\n"
-                "- Output exactly 16 stickers arranged in a strict 4 columns x 4 rows grid on a square 1:1 canvas.\n"
-                "- Do not produce a portrait sheet, landscape sheet, 4x5, 5x4, 5x3, 15 stickers, a fifth row, or any other layout.\n"
-                "- Keep every prop, limb, caption, and accessory fully inside its own cell with extra margin.\n"
-                "- Reserve at least 10% empty space from every cell edge; do not let any object or text touch the boundary.\n"
-                "- Maintain the same camera distance and same subject size across all cells; do not mix close-up stickers with full-body stickers.\n"
-                "- Keep each character at a consistent scale, targeting about 72-76% of the cell height.\n"
-                "- Hanging props near the top, wide props near the sides, and Thai captions near the bottom must stay comfortably inside the safe area.\n"
-                "- If a composition feels tight, make the character and props slightly smaller rather than filling the cell.\n"
-                "- Do not add visible grid outlines, black divider lines, or rectangular panels while correcting framing.\n"
-                if strict_cell_framing
-                else ""
-            )
-
-            full_prompt = (
-                f"{self.TECHNICAL_TOKENS}\n"
-                "Objective: Create a professional 16-pose sticker sheet (4 columns by 4 rows) on a square 1:1 canvas based on the uploaded photo.\n" # by = X 
-                f"{style_prompt}\n"
-                f"{text_instruction}\n"
-                f"{user_direction}\n"
-                f"{framing_retry_instruction}\n"
-                "Subject Identity Rule: maintain recognizable facial identity from the uploaded photo.\n"
-                "Character should be positioned clearly in each grid cell."
-            ).strip()
-
-            async with ai_provider_capacity_limiter(provider=self.provider, model_id=self.model_id):
-                if self.provider in self.GEMINI_PROVIDER_ALIASES:
-                    return await self._generate_with_gemini_api(
+            if self.provider in self.GEMINI_PROVIDER_ALIASES:
+                full_prompt, prompt_profile = self._build_full_prompt(
+                    style_id=style_id,
+                    extra_prompt=extra_prompt,
+                    strict_cell_framing=strict_cell_framing,
+                    model_id=self.model_id,
+                )
+                async with ai_provider_capacity_limiter(provider="gemini_api", model_id=self.model_id):
+                    image_bytes = await self._generate_with_gemini_api(
                         image_uri=image_uri,
                         prompt=full_prompt,
                         max_retries=self.max_retries,
                         provider_label="Gemini API",
+                        model_id=self.model_id,
                     )
+                return StickerGridGenerationResult(
+                    image_bytes=image_bytes,
+                    provider="gemini_api",
+                    model_id=self.model_id,
+                    prompt_profile=prompt_profile,
+                )
 
-                try:
-                    return await self._generate_with_vertex(
-                        image_uri=image_uri,
-                        prompt=full_prompt,
-                        max_retries=self.max_retries,
-                        provider_label="Vertex AI",
-                    )
-                except Exception as e:
-                    if not self._is_retryable_error(e):
-                        raise
+            if self.provider == "vertex":
+                return await self._generate_with_vertex_route(
+                    image_uri=image_uri,
+                    style_id=style_id,
+                    extra_prompt=extra_prompt,
+                    strict_cell_framing=strict_cell_framing,
+                    vertex_model_ids=vertex_model_route_override,
+                )
 
-                    if self.fallback_provider in self.GEMINI_PROVIDER_ALIASES and self.gemini_api_key:
-                        logger.warning("Vertex AI exhausted. Falling back to Gemini API.")
-                        try:
-                            return await self._generate_with_gemini_api(
-                                image_uri=image_uri,
-                                prompt=full_prompt,
-                                max_retries=self.fallback_max_retries,
-                                provider_label="Gemini API (fallback)",
-                            )
-                        except Exception as fallback_error:
-                            if self._is_retryable_error(fallback_error):
-                                raise AIProviderCapacityError() from fallback_error
-                            raise
-
-                    raise AIProviderCapacityError() from e
+            raise ValueError(f"Unsupported GENAI_PROVIDER: {self.provider}")
         except Exception as e:
             logger.error(f"Error generating sticker grid: {e}")
             raise e
+
+    async def _generate_with_vertex_route(
+        self,
+        image_uri: str,
+        style_id: str,
+        extra_prompt: Optional[str],
+        strict_cell_framing: bool,
+        vertex_model_ids: list[str] | None = None,
+    ) -> StickerGridGenerationResult:
+        last_retryable_error: Exception | None = None
+        route = [model_id for model_id in (vertex_model_ids or self.vertex_model_ids) if model_id]
+        if not route:
+            raise ValueError("No Vertex model route configured.")
+
+        for index, model_id in enumerate(route):
+            provider_label = f"Vertex AI ({model_id})"
+            prompt, prompt_profile = self._build_full_prompt(
+                style_id=style_id,
+                extra_prompt=extra_prompt,
+                strict_cell_framing=strict_cell_framing,
+                model_id=model_id,
+            )
+            try:
+                async with ai_provider_capacity_limiter(provider="vertex", model_id=model_id):
+                    image_bytes = await self._generate_with_vertex(
+                        image_uri=image_uri,
+                        prompt=prompt,
+                        max_retries=self.max_retries,
+                        provider_label=provider_label,
+                        model_id=model_id,
+                    )
+                return StickerGridGenerationResult(
+                    image_bytes=image_bytes,
+                    provider="vertex",
+                    model_id=model_id,
+                    prompt_profile=prompt_profile,
+                )
+            except AIProviderCapacityError:
+                raise
+            except Exception as e:
+                if not self._is_retryable_error(e):
+                    raise
+                last_retryable_error = e
+                has_next_vertex_model = index < len(route) - 1
+                if has_next_vertex_model:
+                    next_model = route[index + 1]
+                    logger.warning(
+                        "Vertex model %s exhausted. Trying fallback Vertex model %s.",
+                        model_id,
+                        next_model,
+                    )
+
+        if self.fallback_provider in self.GEMINI_PROVIDER_ALIASES and self.gemini_api_key:
+            api_model_id = self.gemini_api_fallback_model_id
+            prompt, prompt_profile = self._build_full_prompt(
+                style_id=style_id,
+                extra_prompt=extra_prompt,
+                strict_cell_framing=strict_cell_framing,
+                model_id=api_model_id,
+            )
+            logger.warning(
+                "Vertex model route exhausted. Falling back to Gemini API model %s.",
+                api_model_id,
+            )
+            try:
+                async with ai_provider_capacity_limiter(provider="gemini_api", model_id=api_model_id):
+                    image_bytes = await self._generate_with_gemini_api(
+                        image_uri=image_uri,
+                        prompt=prompt,
+                        max_retries=self.fallback_max_retries,
+                        provider_label=f"Gemini API fallback ({api_model_id})",
+                        model_id=api_model_id,
+                    )
+                return StickerGridGenerationResult(
+                    image_bytes=image_bytes,
+                    provider="gemini_api",
+                    model_id=api_model_id,
+                    prompt_profile=prompt_profile,
+                )
+            except Exception as fallback_error:
+                if self._is_retryable_error(fallback_error):
+                    raise AIProviderCapacityError() from fallback_error
+                raise
+
+        raise AIProviderCapacityError() from last_retryable_error
 
     async def _generate_with_vertex(
         self,
@@ -286,11 +504,14 @@ class AIService:
         prompt: str,
         max_retries: Optional[int] = None,
         provider_label: str = "Vertex AI",
+        model_id: str | None = None,
     ) -> bytes:
+        resolved_model_id = model_id or self.model_id
+        model = self._get_vertex_model(resolved_model_id)
         image_part = Part.from_uri(image_uri, mime_type="image/jpeg")
 
         async def _call():
-            return await self.model.generate_content_async(
+            return await model.generate_content_async(
                 contents=[image_part, prompt],
                 generation_config=self.generation_config,
             )
@@ -329,7 +550,7 @@ class AIService:
             ]
             logger.warning(
                 "Vertex AI returned no image data. model=%s candidates=%d parts=%s finish_reason=%s",
-                self.model_id,
+                resolved_model_id,
                 len(candidates),
                 part_types,
                 getattr(first_candidate, "finish_reason", None),
@@ -345,7 +566,9 @@ class AIService:
         prompt: str,
         max_retries: Optional[int] = None,
         provider_label: str = "Gemini API",
+        model_id: str | None = None,
     ) -> bytes:
+        resolved_model_id = model_id or self.model_id
         image_bytes = await self._load_image_bytes(image_uri)
         mime_type = self._guess_mime_type(image_bytes)
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -369,7 +592,7 @@ class AIService:
         }
 
         async def _call():
-            return await self._request_gemini_api(payload)
+            return await self._request_gemini_api(payload, model_id=resolved_model_id)
 
         data = await self._generate_with_retry(
             _call,
@@ -389,8 +612,9 @@ class AIService:
 
         raise ValueError("API returned success but no image data was found.")
 
-    async def _request_gemini_api(self, payload: dict) -> dict:
-        url = f"{self.gemini_api_base_url}/v1beta/models/{self.model_id}:generateContent"
+    async def _request_gemini_api(self, payload: dict, model_id: str | None = None) -> dict:
+        resolved_model_id = model_id or self.model_id
+        url = f"{self.gemini_api_base_url}/v1beta/models/{resolved_model_id}:generateContent"
         params = {"key": self.gemini_api_key}
         timeout = httpx.Timeout(120.0)
 

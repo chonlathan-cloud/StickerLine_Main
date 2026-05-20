@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     VERTEX_MODEL: str = "gemini-3-pro-image-preview"
     VERTEX_LOCATION: str = "global"
     GENAI_PROVIDER: str = "vertex"
+    GENAI_MODEL_ROUTING_ENABLED: bool = False
+    PRIMARY_VERTEX_MODEL: str | None = None
+    FALLBACK_VERTEX_MODEL: str | None = None
+    GENAI_VERTEX_MODEL_ROUTE: str | None = None
+    GENAI_GEMINI_API_FALLBACK_MODEL: str | None = None
+    GENAI_PROMPT_PROFILE: str = "auto"
+    GENAI_QUALITY_ATTEMPTS: int = 3
+    GENAI_QUALITY_FALLBACK_ENABLED: bool = True
     GEMINI_API_KEY: str | None = None
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com"
     GEMINI_IMAGE_ASPECT_RATIO: str = "1:1"

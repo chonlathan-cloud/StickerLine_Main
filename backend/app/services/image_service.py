@@ -185,6 +185,74 @@ class ImageProcessor:
             })
         return risky
 
+    def assess_sticker_set_top_attached_artifact_risk(self, sticker_pngs: List[bytes]) -> list[dict]:
+        risky: list[dict] = []
+        for index, sticker_png in enumerate(sticker_pngs):
+            metrics = self._measure_top_attached_artifact_risk(sticker_png)
+            if not metrics["is_risky"]:
+                continue
+            risky.append({
+                "index": index,
+                "top_bounds": metrics["top_bounds"],
+                "stable_center": metrics["stable_center"],
+                "top_center": metrics["top_center"],
+                "skin_ratio": metrics["skin_ratio"],
+                "dark_ratio": metrics["dark_ratio"],
+                "bright_ratio": metrics["bright_ratio"],
+                "severity": metrics["severity"],
+            })
+        return risky
+
+    def assess_raw_grid_caption_placement_risk(self, image_bytes: bytes) -> list[dict]:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if cv_img is None:
+            return []
+
+        try:
+            cv_img = self._trim_green_margin(cv_img)
+            columns, rows, x_edges, y_edges = self._resolve_grid_layout(cv_img, columns=4, rows=4)
+        except Exception:
+            columns = self.TARGET_GRID_COLUMNS
+            rows = self.TARGET_GRID_ROWS
+            height, width = cv_img.shape[:2]
+            x_edges = self._equal_edges(width, columns)
+            y_edges = self._equal_edges(height, rows)
+
+        risky_cells: list[dict] = []
+        for row in range(rows):
+            for col in range(columns):
+                y1 = int(y_edges[row])
+                y2 = int(y_edges[row + 1])
+                x1 = int(x_edges[col])
+                x2 = int(x_edges[col + 1])
+                if y2 <= y1 or x2 <= x1:
+                    continue
+                metrics = self._measure_cell_top_caption_risk(cv_img[y1:y2, x1:x2])
+                if not metrics["is_risky"]:
+                    continue
+                risky_cells.append({
+                    "index": row * columns + col,
+                    "row": row,
+                    "column": col,
+                    "top_peak": metrics["top_peak"],
+                    "bottom_peak": metrics["bottom_peak"],
+                    "top_span": metrics["top_span"],
+                })
+
+        # Single-cell false positives can be dark hair/props. Treat this as a
+        # sheet-level warning only when the model systematically placed captions
+        # in the top region.
+        min_risky_cells = max(6, (columns * rows) // 2)
+        if len(risky_cells) < min_risky_cells:
+            return []
+
+        return [{
+            "cells": risky_cells,
+            "risky_cell_count": len(risky_cells),
+            "severity": 1 + (len(risky_cells) // 4),
+        }]
+
     def assess_subject_scale_consistency(self, sticker_pngs: List[bytes]) -> dict:
         ratios: list[float] = []
         indexed_ratios: list[tuple[int, float]] = []
@@ -468,6 +536,152 @@ class ImageProcessor:
             "ratio": ratio,
             "bounds": bounds,
             "severity": severity,
+        }
+
+    def _measure_top_attached_artifact_risk(self, sticker_png: bytes) -> dict:
+        empty = {
+            "is_risky": False,
+            "top_bounds": None,
+            "stable_center": 0.0,
+            "top_center": 0.0,
+            "skin_ratio": 0.0,
+            "dark_ratio": 0.0,
+            "bright_ratio": 0.0,
+            "severity": 0,
+        }
+
+        nparr = np.frombuffer(sticker_png, np.uint8)
+        rgba = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.ndim < 3 or rgba.shape[2] < 4:
+            return empty
+
+        b, g, r, alpha = cv2.split(rgba)
+        mask = alpha > 16
+        ys, xs = np.where(mask)
+        if xs.size == 0:
+            return empty
+
+        x1 = int(xs.min())
+        x2 = int(xs.max() + 1)
+        y1 = int(ys.min())
+        content_width = max(1, x2 - x1)
+
+        top_row: tuple[int, int, int, int] | None = None
+        for yy in range(y1, min(y1 + 8, alpha.shape[0])):
+            row_xs = np.where(mask[yy, :])[0]
+            if row_xs.size == 0:
+                continue
+            top_row = (int(yy), int(row_xs.min()), int(row_xs.max() + 1), int(row_xs.size))
+            break
+        if top_row is None:
+            return empty
+
+        top_y, top_x1, top_x2, top_count = top_row
+        top_center = (top_x1 + top_x2) / 2.0
+
+        centers: list[float] = []
+        widths: list[int] = []
+        for yy in range(min(y1 + 35, alpha.shape[0] - 1), min(y1 + 75, alpha.shape[0])):
+            row_xs = np.where(mask[yy, :])[0]
+            if row_xs.size == 0:
+                continue
+            centers.append(float((row_xs.min() + row_xs.max() + 1) / 2.0))
+            widths.append(int(row_xs.max() - row_xs.min() + 1))
+        if not centers:
+            return empty
+
+        stable_center = float(np.median(centers))
+        stable_width = float(np.median(widths)) if widths else 0.0
+        top_slice = mask[y1:min(y1 + 8, alpha.shape[0]), top_x1:top_x2]
+        if top_slice.size == 0 or not np.any(top_slice):
+            return empty
+
+        region_r = r[y1:min(y1 + 8, alpha.shape[0]), top_x1:top_x2][top_slice]
+        region_g = g[y1:min(y1 + 8, alpha.shape[0]), top_x1:top_x2][top_slice]
+        region_b = b[y1:min(y1 + 8, alpha.shape[0]), top_x1:top_x2][top_slice]
+        if region_r.size == 0:
+            return empty
+
+        skin_mask = (
+            (region_r > 110)
+            & (region_g > 55)
+            & (region_g < 205)
+            & (region_b < 170)
+            & ((region_r.astype(np.int16) - region_b.astype(np.int16)) > 25)
+        )
+        dark_mask = (region_r < 100) & (region_g < 100) & (region_b < 100)
+        bright_mask = (region_r > 185) & (region_g > 185) & (region_b > 185)
+        skin_ratio = float(skin_mask.mean())
+        dark_ratio = float(dark_mask.mean())
+        bright_ratio = float(bright_mask.mean())
+
+        is_narrow = top_count <= max(34, int(round(content_width * 0.18)))
+        is_offset = abs(top_center - stable_center) >= max(26.0, content_width * 0.13)
+        is_non_skin = skin_ratio <= 0.10
+        is_dark_white_mark = dark_ratio >= 0.18 and bright_ratio >= 0.20
+        expands_to_main_mass = stable_width >= max(105.0, top_count * 2.4)
+        is_risky = bool(
+            is_narrow
+            and is_offset
+            and is_non_skin
+            and is_dark_white_mark
+            and expands_to_main_mass
+        )
+
+        return {
+            "is_risky": is_risky,
+            "top_bounds": {
+                "x": top_x1,
+                "y": top_y,
+                "width": max(1, top_x2 - top_x1),
+                "height": min(8, alpha.shape[0] - y1),
+                "pixel_count": top_count,
+            },
+            "stable_center": round(stable_center, 2),
+            "top_center": round(top_center, 2),
+            "skin_ratio": round(skin_ratio, 3),
+            "dark_ratio": round(dark_ratio, 3),
+            "bright_ratio": round(bright_ratio, 3),
+            "severity": 1 if is_risky else 0,
+        }
+
+    def _measure_cell_top_caption_risk(self, cell_img: np.ndarray) -> dict:
+        if cell_img is None or cell_img.size == 0 or cell_img.ndim < 3:
+            return {"is_risky": False, "top_peak": 0, "bottom_peak": 0, "top_span": 0}
+
+        height, width = cell_img.shape[:2]
+        if height <= 0 or width <= 0:
+            return {"is_risky": False, "top_peak": 0, "bottom_peak": 0, "top_span": 0}
+
+        b, g, r = cv2.split(cell_img)
+        dark = (r < 72) & (g < 72) & (b < 72)
+        top_limit = max(1, int(round(height * 0.38)))
+        bottom_start = min(height - 1, max(0, int(round(height * 0.52))))
+        top = dark[:top_limit, :]
+        bottom = dark[bottom_start:, :]
+        top_counts = top.sum(axis=1)
+        bottom_counts = bottom.sum(axis=1)
+        top_peak = int(top_counts.max()) if top_counts.size else 0
+        bottom_peak = int(bottom_counts.max()) if bottom_counts.size else 0
+
+        top_span = 0
+        for yy in range(top.shape[0]):
+            xs = np.where(top[yy, :])[0]
+            if xs.size < max(1, top_peak - 5):
+                continue
+            span = int(xs.max() - xs.min() + 1)
+            top_span = max(top_span, span)
+
+        is_risky = bool(
+            top_peak >= int(round(width * 0.25))
+            and top_span >= int(round(width * 0.42))
+            and top_peak > bottom_peak * 1.55
+        )
+        return {
+            "is_risky": is_risky,
+            "top_peak": top_peak,
+            "bottom_peak": bottom_peak,
+            "top_span": top_span,
         }
 
     def _equal_edges(self, size: int, segments: int) -> np.ndarray:

@@ -87,19 +87,35 @@ async def process_generation_job(
             )
             best_candidate: dict | None = None
             last_quality_warnings: list[dict] = []
+            quality_attempts = max(1, int(settings.GENAI_QUALITY_ATTEMPTS))
+            quality_attempt_summaries: list[dict] = []
+            primary_vertex_model_id = ai_service.primary_vertex_model_id()
+            quality_fallback_model_ids = ai_service.quality_fallback_vertex_model_ids()
+            primary_error_fallback_route = (
+                [primary_vertex_model_id, *quality_fallback_model_ids]
+                if primary_vertex_model_id
+                else None
+            )
 
-            for attempt in range(3):
-                grid_bytes = await ai_service.generate_sticker_grid(
+            async def run_quality_attempt(
+                attempt_number: int,
+                strict_cell_framing: bool,
+                vertex_model_route_override: list[str] | None,
+                phase: str,
+            ) -> tuple[dict, bool]:
+                generation_result = await ai_service.generate_sticker_grid_with_metadata(
                     image_uri=request.image_uri,
                     style_id=request.style,
                     extra_prompt=request.prompt,
-                    strict_cell_framing=attempt > 0,
+                    strict_cell_framing=strict_cell_framing,
+                    vertex_model_route_override=vertex_model_route_override,
                 )
+                grid_bytes = generation_result.image_bytes
 
                 try:
                     sticker_images = image_processor.process_sticker_grid(grid_bytes)
                 except UnsupportedStickerGridLayoutError as layout_error:
-                    last_quality_warnings = [{
+                    quality_warnings = [{
                         "type": "layout_mismatch",
                         "details": {
                             "expected_layout": "4x4",
@@ -109,11 +125,21 @@ async def process_generation_job(
                     logger.warning(
                         "Rejected unsupported sticker grid for job %s on attempt %d: %s",
                         job_id,
-                        attempt + 1,
+                        attempt_number,
                         layout_error,
                     )
-                    if attempt < 2:
-                        continue
+                    last_quality_warnings = quality_warnings
+                    quality_attempt_summaries.append({
+                        "attempt": attempt_number,
+                        "phase": phase,
+                        "model_used": generation_result.model_id,
+                        "genai_provider_used": generation_result.provider,
+                        "prompt_profile": generation_result.prompt_profile,
+                        "sticker_count": 0,
+                        "risk_score": abs(TARGET_STICKER_COUNT) * 1000,
+                        "quality_warning_types": [warning["type"] for warning in quality_warnings],
+                        "clean": False,
+                    })
                     raise
 
                 sticker_count = len(sticker_images)
@@ -121,6 +147,11 @@ async def process_generation_job(
                 artifact_risks = image_processor.assess_sticker_set_artifact_risk(sticker_images)
                 residual_screen_risks = image_processor.assess_sticker_set_residual_screen_risk(sticker_images)
                 scale_consistency = image_processor.assess_subject_scale_consistency(sticker_images)
+                top_caption_risks: list[dict] = []
+                top_attached_artifact_risks: list[dict] = []
+                if generation_result.prompt_profile == AIService.GEMINI_31_FLASH_PROMPT_PROFILE:
+                    top_caption_risks = image_processor.assess_raw_grid_caption_placement_risk(grid_bytes)
+                    top_attached_artifact_risks = image_processor.assess_sticker_set_top_attached_artifact_risk(sticker_images)
                 quality_warnings: list[dict] = []
                 if sticker_count != TARGET_STICKER_COUNT:
                     quality_warnings.append({
@@ -145,6 +176,16 @@ async def process_generation_job(
                         "type": "residual_screen_risk",
                         "details": residual_screen_risks,
                     })
+                if top_caption_risks:
+                    quality_warnings.append({
+                        "type": "top_caption_placement_risk",
+                        "details": top_caption_risks,
+                    })
+                if top_attached_artifact_risks:
+                    quality_warnings.append({
+                        "type": "top_attached_artifact_risk",
+                        "details": top_attached_artifact_risks,
+                    })
                 if scale_consistency["is_inconsistent"]:
                     quality_warnings.append({
                         "type": "scale_inconsistency",
@@ -152,12 +193,19 @@ async def process_generation_job(
                     })
 
                 candidate = {
+                    "quality_attempt": attempt_number,
+                    "quality_phase": phase,
+                    "genai_provider_used": generation_result.provider,
+                    "model_used": generation_result.model_id,
+                    "prompt_profile": generation_result.prompt_profile,
                     "grid_bytes": grid_bytes,
                     "sticker_images": sticker_images,
                     "sticker_count": sticker_count,
                     "edge_risks": edge_risks,
                     "artifact_risks": artifact_risks,
                     "residual_screen_risks": residual_screen_risks,
+                    "top_caption_risks": top_caption_risks,
+                    "top_attached_artifact_risks": top_attached_artifact_risks,
                     "scale_consistency": scale_consistency,
                     "quality_warnings": quality_warnings,
                     "risk_score": (
@@ -165,10 +213,46 @@ async def process_generation_job(
                         + sum(int(item.get("severity", 0)) for item in edge_risks)
                         + (sum(int(item.get("severity", 0)) for item in artifact_risks) * 50)
                         + (sum(int(item.get("severity", 0)) for item in residual_screen_risks) * 40)
+                        + (sum(int(item.get("severity", 0)) for item in top_caption_risks) * 80)
+                        + (sum(int(item.get("severity", 0)) for item in top_attached_artifact_risks) * 60)
                         + int(round(scale_consistency["std_ratio"] * 1000))
                         + (len(scale_consistency["outliers"]) * 10)
                     ),
                 }
+                is_clean = (
+                    sticker_count == TARGET_STICKER_COUNT
+                    and not edge_risks
+                    and not artifact_risks
+                    and not residual_screen_risks
+                    and not top_caption_risks
+                    and not top_attached_artifact_risks
+                    and not scale_consistency["is_inconsistent"]
+                )
+                quality_attempt_summaries.append({
+                    "attempt": attempt_number,
+                    "phase": phase,
+                    "model_used": generation_result.model_id,
+                    "genai_provider_used": generation_result.provider,
+                    "prompt_profile": generation_result.prompt_profile,
+                    "sticker_count": sticker_count,
+                    "risk_score": candidate["risk_score"],
+                    "quality_warning_types": [warning["type"] for warning in quality_warnings],
+                    "clean": is_clean,
+                })
+                return candidate, is_clean
+
+            for attempt in range(quality_attempts):
+                try:
+                    candidate, is_clean = await run_quality_attempt(
+                        attempt_number=attempt + 1,
+                        strict_cell_framing=attempt > 0,
+                        vertex_model_route_override=primary_error_fallback_route,
+                        phase="primary",
+                    )
+                except UnsupportedStickerGridLayoutError:
+                    if attempt < quality_attempts - 1 or quality_fallback_model_ids:
+                        continue
+                    raise
 
                 if (
                     best_candidate is None
@@ -179,32 +263,61 @@ async def process_generation_job(
                             len(candidate["edge_risks"])
                             + len(candidate["artifact_risks"])
                             + len(candidate["residual_screen_risks"])
+                            + len(candidate["top_caption_risks"])
+                            + len(candidate["top_attached_artifact_risks"])
                         )
                         < (
                             len(best_candidate["edge_risks"])
                             + len(best_candidate["artifact_risks"])
                             + len(best_candidate["residual_screen_risks"])
+                            + len(best_candidate["top_caption_risks"])
+                            + len(best_candidate["top_attached_artifact_risks"])
                         )
                     )
                 ):
                     best_candidate = candidate
 
-                if (
-                    sticker_count == TARGET_STICKER_COUNT
-                    and not edge_risks
-                    and not artifact_risks
-                    and not residual_screen_risks
-                    and not scale_consistency["is_inconsistent"]
-                ):
+                if is_clean:
                     break
 
-                last_quality_warnings = quality_warnings
+                last_quality_warnings = candidate["quality_warnings"]
                 logger.warning(
                     "Detected sticker quality issues for job %s on attempt %d: %s",
                     job_id,
                     attempt + 1,
-                    quality_warnings,
+                    candidate["quality_warnings"],
                 )
+
+            if (
+                (best_candidate is None or best_candidate["quality_warnings"])
+                and quality_fallback_model_ids
+            ):
+                for fallback_index, fallback_model_id in enumerate(quality_fallback_model_ids, start=1):
+                    attempt_number = quality_attempts + fallback_index
+                    candidate, is_clean = await run_quality_attempt(
+                        attempt_number=attempt_number,
+                        strict_cell_framing=True,
+                        vertex_model_route_override=[fallback_model_id],
+                        phase="quality_fallback",
+                    )
+                    if (
+                        best_candidate is None
+                        or candidate["risk_score"] < best_candidate["risk_score"]
+                        or (
+                            candidate["risk_score"] == best_candidate["risk_score"]
+                            and len(candidate["quality_warnings"]) < len(best_candidate["quality_warnings"])
+                        )
+                    ):
+                        best_candidate = candidate
+                    if is_clean:
+                        break
+                    last_quality_warnings = candidate["quality_warnings"]
+                    logger.warning(
+                        "Detected sticker quality issues for job %s on fallback attempt %d: %s",
+                        job_id,
+                        attempt_number,
+                        candidate["quality_warnings"],
+                    )
 
             if best_candidate is None:
                 raise ValueError("Sticker generation did not produce any candidate output.")
@@ -235,6 +348,15 @@ async def process_generation_job(
                 {
                     "grid_blob": grid_blob,
                     "quality_warnings": best_candidate["quality_warnings"] or last_quality_warnings,
+                    "quality_attempts_requested": quality_attempts,
+                    "quality_attempts_used": int(best_candidate.get("quality_attempt") or 1),
+                    "quality_phase": best_candidate.get("quality_phase"),
+                    "quality_fallback_used": best_candidate.get("quality_phase") == "quality_fallback",
+                    "quality_attempt_summaries": quality_attempt_summaries,
+                    "risk_score": int(best_candidate.get("risk_score") or 0),
+                    "model_used": best_candidate.get("model_used"),
+                    "genai_provider_used": best_candidate.get("genai_provider_used"),
+                    "prompt_profile": best_candidate.get("prompt_profile"),
                 },
             )
 
