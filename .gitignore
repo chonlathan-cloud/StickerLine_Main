@@ -1,0 +1,32 @@
+# Environments
+.env
+.env.*
+
+
+# Python virtual environment
+venv/
+.venv/
+backend/venv/
+backend/.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Node.js
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS files
+.DS_Store
+
+# Temporary files
+backend/tmp/
+# comment
