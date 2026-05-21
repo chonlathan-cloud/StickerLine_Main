@@ -321,9 +321,9 @@ const PromptPresetTray = ({
 
   return (
     <div className="mt-4 rounded-2xl border border-border-light-purple/70 bg-white/45 p-3">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
         <p className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-outline">Quick ideas</p>
-        <div className="flex min-w-0 gap-1 overflow-x-auto rounded-full bg-surface-container p-1">
+        <div className="grid w-full grid-cols-4 gap-1 rounded-full bg-surface-container p-1 sm:w-auto sm:min-w-[288px]">
           {PROMPT_CHIP_GROUPS.map((group) => {
             const active = group.label === activeGroupLabel;
             return (
@@ -331,13 +331,13 @@ const PromptPresetTray = ({
                 type="button"
                 key={group.label}
                 onClick={() => setActiveGroupLabel(group.label)}
-                className={`h-8 shrink-0 rounded-full px-3 text-[11px] font-extrabold transition-colors ${
+                className={`flex h-8 min-w-0 items-center justify-center rounded-full px-2 text-[10px] font-extrabold transition-colors sm:px-3 sm:text-[11px] ${
                   active
                     ? 'bg-white text-primary shadow-sm'
                     : 'text-on-surface-variant hover:bg-white/60'
                 }`}
               >
-                {group.label}
+                <span className="truncate">{group.label}</span>
               </button>
             );
           })}
@@ -353,8 +353,8 @@ const PromptPresetTray = ({
                 type="button"
                 key={tag}
                 onClick={() => onPromptChip(tag)}
-                disabled={selected}
-                className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-4 text-xs font-bold transition-colors disabled:cursor-default ${
+                aria-pressed={selected}
+                className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-4 text-xs font-bold transition-colors ${
                   selected
                     ? 'bg-secondary-container text-on-secondary-container'
                     : 'bg-surface-container-high text-on-surface-variant hover:bg-primary-container/10'
@@ -760,7 +760,7 @@ const WorkspaceView = ({
         config={config}
         loading={loading}
         canGenerate={canGenerate}
-        retryBlocked={isCapacityRetryActive}
+        retryBlocked={retryBlocked}
         loadingHeadline={loadingHeadline}
         loadingSubtext={loadingSubtext}
         simulatedProgress={simulatedProgress}
@@ -1330,17 +1330,19 @@ const GeneratePage: React.FC = () => {
 
   const openImagePicker = () => fileInputRef.current?.click();
 
-  const appendPromptChip = (chip: string) => {
+  const togglePromptChip = (chip: string) => {
     setConfig((previous) => {
       const parts = previous.extraPrompt
         .split(',')
         .map((part) => part.trim())
         .filter(Boolean);
-      const alreadyExists = parts.some((part) => part.toLowerCase() === chip.toLowerCase());
-      if (alreadyExists) return previous;
+      const chipKey = chip.toLowerCase();
+      const alreadyExists = parts.some((part) => part.toLowerCase() === chipKey);
       return {
         ...previous,
-        extraPrompt: [...parts, chip].join(', '),
+        extraPrompt: alreadyExists
+          ? parts.filter((part) => part.toLowerCase() !== chipKey).join(', ')
+          : [...parts, chip].join(', '),
       };
     });
     setError(null);
@@ -1813,7 +1815,7 @@ const GeneratePage: React.FC = () => {
         onImageUpload={handleImageUpload}
         onStyleChange={(style) => setConfig((previous) => ({ ...previous, style }))}
         onPromptChange={(prompt) => setConfig((previous) => ({ ...previous, extraPrompt: prompt }))}
-        onPromptChip={(chip) => appendPromptChip(chip)}
+        onPromptChip={(chip) => togglePromptChip(chip)}
         onUsePromptExample={() => setConfig((previous) => ({ ...previous, extraPrompt: PROMPT_GUIDE_EXAMPLE }))}
         onClearPrompt={() => setConfig((previous) => ({ ...previous, extraPrompt: '' }))}
         onGenerate={generateSheet}
