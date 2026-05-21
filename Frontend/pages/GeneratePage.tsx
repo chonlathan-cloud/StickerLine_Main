@@ -982,7 +982,7 @@ const SuccessView = ({
           </p>
         </section>
       ) : extraSlots.length ? (
-        <section className="pb-32">
+        <section className="pb-8">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <StarIcon className="text-secondary-container" />
@@ -1021,28 +1021,26 @@ const SuccessView = ({
               Clear
             </button>
           </div>
-        </section>
-      ) : null}
 
-      {finalPackExported && extraSlots.length ? (
-        <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-md border-t border-border-light-purple z-40">
-          <div className="max-w-md mx-auto flex items-center gap-4">
-            <div className="flex-1">
-              <p className="text-xs text-on-surface-variant font-bold">
-                {extraPackPaid ? 'Extra Vault unlocked' : `Unlock selected (${selectedCount})`}
-              </p>
-              <p className="text-xl font-black text-primary italic">99 THB</p>
+          <div className="mt-5 rounded-2xl border border-border-light-purple bg-white/70 p-4 shadow-sm">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex-1">
+                <p className="text-xs font-bold text-on-surface-variant">
+                  {extraPackPaid ? 'Extra Vault unlocked' : `Selected extras (${selectedCount})`}
+                </p>
+                <p className="text-xl font-black text-primary italic">99 THB</p>
+              </div>
+              <Button
+                onClick={extraPackPaid ? onDownloadExtras : () => setShowVault(true)}
+                disabled={isBusy || selectedCount === 0}
+                className="w-full sm:w-auto sm:px-8"
+              >
+                {isBusy ? <RefreshIcon className="animate-spin" /> : extraPackPaid ? <DownloadIcon /> : <PaymentsIcon />}
+                {extraPackPaid ? extraDownloadLabel : 'Payment 99 THB'}
+              </Button>
             </div>
-            <Button
-              onClick={extraPackPaid ? onDownloadExtras : () => setShowVault(true)}
-              disabled={isBusy || selectedCount === 0}
-              className="px-10"
-            >
-              {isBusy ? <RefreshIcon className="animate-spin" /> : extraPackPaid ? <DownloadIcon /> : <PaymentsIcon />}
-              {extraPackPaid ? extraDownloadLabel : 'Payment 99 THB'}
-            </Button>
           </div>
-        </div>
+        </section>
       ) : null}
 
       <AnimatePresence>
